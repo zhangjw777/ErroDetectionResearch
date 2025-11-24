@@ -111,7 +111,9 @@ class GECPredictor:
                 'corrected': 纠正后的文本,
                 'tokens': token列表,
                 'labels': 编辑标签列表,
-                'edits': 编辑操作详情
+                'edits': 编辑操作详情,
+                'sent_has_error': 句子是否有错 (bool),
+                'sent_error_prob': 句子有错的概率 (float)
             }
         """
         # Tokenize
@@ -134,10 +136,15 @@ class GECPredictor:
         attention_mask = torch.ones_like(input_ids_tensor)
         
         # 模型预测
-        gec_logits, svo_logits = self.model(
+        gec_logits, svo_logits, sent_logits = self.model(
             input_ids=input_ids_tensor,
             attention_mask=attention_mask
         )
+        
+        # 句级错误检测预测
+        sent_probs = F.softmax(sent_logits, dim=-1).squeeze(0)  # [2]
+        sent_error_prob = sent_probs[1].item()  # 预测"有错"的概率
+        sent_has_error = sent_error_prob > 0.5  # 二分类阈值
         
         # 获取预测标签
         gec_preds = torch.argmax(gec_logits, dim=-1).squeeze(0).cpu().tolist()
@@ -166,7 +173,9 @@ class GECPredictor:
             'corrected': corrected_text,
             'tokens': tokens,
             'labels': token_labels,
-            'edits': edits
+            'edits': edits,
+            'sent_has_error': sent_has_error,  # 句子是否有错（bool）
+            'sent_error_prob': sent_error_prob  # 句子有错的概率（float）
         }
     
     def _apply_edits(self, tokens: List[str], labels: List[str]) -> str:
@@ -240,8 +249,11 @@ def main():
         result = predictor.predict(text)
         print(f"\n原文: {result['original']}")
         print(f"纠正: {result['corrected']}")
+        print(f"句级判断: {'[有错]' if result['sent_has_error'] else '[无错]'} (概率: {result['sent_error_prob']:.3f})")
         if result['edits']:
             print(f"编辑: {result['edits']}")
+        else:
+            print("编辑: 无需修改")
 
 
 if __name__ == "__main__":

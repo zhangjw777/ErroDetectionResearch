@@ -207,7 +207,8 @@ def create_dataloaders(
     gec_label_map: Dict,
     svo_label_map: Dict,
     batch_size: int = 32,
-    num_workers: int = 4
+    num_workers: int = 4,
+    max_length: int = 128
 ) -> Tuple[DataLoader, DataLoader]:
     """
     创建训练和验证的DataLoader
@@ -220,15 +221,16 @@ def create_dataloaders(
         svo_label_map: SVO标签映射
         batch_size: batch大小
         num_workers: worker数量
+        max_length: 最大序列长度
     
     Returns:
         train_loader, dev_loader
     """
     train_dataset = GECDataset(
-        train_path, tokenizer, gec_label_map, svo_label_map
+        train_path, tokenizer, gec_label_map, svo_label_map, max_length=max_length
     )
     dev_dataset = GECDataset(
-        dev_path, tokenizer, gec_label_map, svo_label_map
+        dev_path, tokenizer, gec_label_map, svo_label_map, max_length=max_length
     )
     
     train_loader = DataLoader(

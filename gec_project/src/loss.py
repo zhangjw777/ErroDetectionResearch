@@ -60,11 +60,20 @@ class FocalLoss(nn.Module):
         logits = logits.view(-1, logits.size(-1))  # [B*L, num_labels]
         targets = targets.view(-1)  # [B*L]
         
+        # **关键修复**：先处理 ignore_index，避免 gather 时访问非法索引
+        # 创建 mask，标记有效位置
+        mask = (targets != self.ignore_index).float()
+        
+        # 将 ignore_index 的位置临时映射到合法值（0，即 $KEEP）
+        # 这些位置的 loss 会在后面通过 mask 被清零
+        valid_targets = targets.clone()
+        valid_targets[targets == self.ignore_index] = 0
+        
         # 计算log_softmax
         log_probs = F.log_softmax(logits, dim=-1)
         
-        # 获取目标类别的log概率
-        log_probs = log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+        # 获取目标类别的log概率（现在所有 index 都是合法的）
+        log_probs = log_probs.gather(dim=-1, index=valid_targets.unsqueeze(-1)).squeeze(-1)
         
         # 计算p_t
         probs = torch.exp(log_probs)
@@ -73,18 +82,17 @@ class FocalLoss(nn.Module):
         focal_weight = (1 - probs) ** self.gamma
         
         # Alpha平衡 (简化版：对所有非$KEEP类加权)
-        # TODO: 可以为每个类别设置不同的alpha
+        # 注意：这里仍然使用 valid_targets，因为 targets 中可能有 -100
         alpha_weight = torch.where(
-            targets == 0,  # 假设$KEEP的ID是0
-            torch.full_like(targets, self.alpha, dtype=torch.float),
-            torch.full_like(targets, 1 - self.alpha, dtype=torch.float)
+            valid_targets == 0,  # $KEEP 的 ID 是 0（已验证）
+            torch.full_like(valid_targets, self.alpha, dtype=torch.float),
+            torch.full_like(valid_targets, 1 - self.alpha, dtype=torch.float)
         )
         
         # 计算loss
         loss = -alpha_weight * focal_weight * log_probs
         
-        # 处理ignore_index
-        mask = (targets != self.ignore_index).float()
+        # 应用 mask，清零 ignore_index 位置的 loss
         loss = loss * mask
         
         # 如果提供了label_mask，进一步过滤

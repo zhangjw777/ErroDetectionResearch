@@ -214,9 +214,18 @@ def align_tokens_with_difflib(
                     # 如果是 Source 的最后一个字，且 Target 还有剩余，把剩余的拼进来
                     if k == src_len - 1 and src_len < tgt_len:
                         remaining = "".join(target_tokens[j1 + k + 1 : j2])
-                        gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{replace_char}{remaining}")
+                        full_replacement = replace_char + remaining
+                        # **标签压缩策略**：如果启用了压缩且不在高频词表中，使用 MASK
+                        if cfg.ENABLE_LABEL_COMPRESSION and full_replacement not in cfg.HIGH_FREQ_FUNCTION_WORDS:
+                            gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}MASK")
+                        else:
+                            gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{full_replacement}")
                     else:
-                        gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{replace_char}")
+                        # **标签压缩策略**
+                        if cfg.ENABLE_LABEL_COMPRESSION and replace_char not in cfg.HIGH_FREQ_FUNCTION_WORDS:
+                            gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}MASK")
+                        else:
+                            gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{replace_char}")
                     
                     # 2. 生成 SVO 标签 (继承 Target)
                     # 逻辑：错字也是句子骨架的一部分
@@ -254,7 +263,12 @@ def align_tokens_with_difflib(
                 # 尝试挂载到前一个 token
                 last_label = gec_labels[-1]
                 if last_label == cfg.GEC_KEEP_LABEL:
-                    gec_labels[-1] = f"{cfg.GEC_APPEND_PREFIX}{insert_content}"
+                    # **标签压缩策略**：只为高频词生成专门的 APPEND 标签
+                    if cfg.ENABLE_LABEL_COMPRESSION and insert_content not in cfg.HIGH_FREQ_FUNCTION_WORDS:
+                        # 对于非高频词，统一使用 APPEND_MASK
+                        gec_labels[-1] = f"{cfg.GEC_APPEND_PREFIX}MASK"
+                    else:
+                        gec_labels[-1] = f"{cfg.GEC_APPEND_PREFIX}{insert_content}"
                 # 如果前一个是 Replace/Delete，简化处理忽略 Append，或者不做处理
             else:
                 # 句首 Insert，受限于 GECToR 机制可能丢失，暂忽略

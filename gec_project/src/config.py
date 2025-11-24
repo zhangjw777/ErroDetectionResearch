@@ -45,6 +45,33 @@ NUM_SVO_LABELS = len(SVO_LABELS)
 # 高频字词表大小（用于生成APPEND/REPLACE标签）
 TOP_FREQ_CHARS = 3000  # 前3000个高频公文用字
 
+# 高频虚词列表（用于 APPEND/REPLACE 标签轻量化）
+# 只为这些字符生成专门的标签，其余使用 MASK
+HIGH_FREQ_FUNCTION_WORDS = [
+    # 结构助词
+    "的", "地", "得", "了", "着", "过",
+    # 判断词
+    "是", "为",
+    # 连词
+    "和", "与", "及", "或", "而", "且",
+    # 介词
+    "在", "于", "对", "从", "把", "被", "由", "向", "到", "给", "让", "叫", "以",
+    "通过", "经过", "根据", "依据", "按照", "关于", "为了",
+    # 语气助词
+    "吗", "呢", "吧", "啊", "呀", "哇",
+    # 副词
+    "不", "没", "都", "也", "还", "就", "才", "又", "再", "更", "很", "最", "非常",
+    # 代词
+    "我", "你", "他", "她", "它", "们", "这", "那", "哪", "什么", "怎么", "怎样",
+    # 数词
+    "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "百", "千", "万",
+    # 量词
+    "个", "位", "名", "项", "件", "份", "次", "年", "月", "日",
+]
+
+# 标签压缩策略开关
+ENABLE_LABEL_COMPRESSION = True  # 是否启用标签压缩（建议在标签词表超过5000时启用）
+
 # ==================== 训练配置 ====================
 # 基础训练参数
 BATCH_SIZE = 32
@@ -58,7 +85,7 @@ MAX_GRAD_NORM = 1.0
 FOCAL_LOSS_GAMMA = 2.0      # Focal Loss的聚焦参数
 FOCAL_LOSS_ALPHA = 0.25     # 针对$KEEP标签的权重
 MTL_LAMBDA_SVO = 0.5        # 多任务学习中SVO任务的权重
-MTL_LAMBDA_SENT = 0.3       # 多任务学习中句级错误检测任务的权重
+MTL_LAMBDA_SENT = 0.5       # 多任务学习中句级错误检测任务的权重
 
 # Early Stopping
 PATIENCE = 5  # 验证集连续5个epoch没提升就停止
@@ -196,6 +223,8 @@ class Config:
         self.SVO_LABELS = self.svo_labels = SVO_LABELS
         self.NUM_SVO_LABELS = self.num_svo_labels = NUM_SVO_LABELS
         self.TOP_FREQ_CHARS = self.top_freq_chars = TOP_FREQ_CHARS
+        self.HIGH_FREQ_FUNCTION_WORDS = self.high_freq_function_words = HIGH_FREQ_FUNCTION_WORDS
+        self.ENABLE_LABEL_COMPRESSION = self.enable_label_compression = ENABLE_LABEL_COMPRESSION
         
         # 训练配置
         self.BATCH_SIZE = self.batch_size = BATCH_SIZE

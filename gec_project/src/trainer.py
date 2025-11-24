@@ -267,11 +267,11 @@ class GECTrainer:
         precision = tp / (tp + fp + 1e-10)
         
         # F0.5 (强调Precision)
-        beta = 0.5
+        beta = cfg.EVAL_F_BETA
         f05 = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-10)
         
         # F2 (强调Recall)
-        beta = 2.0
+        beta = cfg.EVAL_F2_BETA
         f2 = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-10)
         
         # Accuracy (不太重要，因为大部分是$KEEP)
@@ -376,7 +376,8 @@ def main():
         gec_label_map=gec_label_map,
         svo_label_map=svo_label_map,
         batch_size=cfg.BATCH_SIZE,
-        num_workers=cfg.NUM_WORKERS
+        num_workers=cfg.NUM_WORKERS,
+        max_length=cfg.MAX_SEQ_LENGTH
     )
     
     # 创建模型
