@@ -91,10 +91,20 @@ class FocalLoss(nn.Module):
         if label_mask is not None:
             label_mask = label_mask.view(-1)
             loss = loss * label_mask
+            # **修复归一化问题**：计算实际有效的token数量
+            # 同时考虑 ignore_index 和 label_mask
+            effective_mask = mask * label_mask
+        else:
+            effective_mask = mask
         
         # Reduction
         if self.reduction == 'mean':
-            return loss.sum() / mask.sum()
+            # **关键修复**：除以实际参与计算的token数量，而非所有非ignore的token数量
+            effective_count = effective_mask.sum()
+            if effective_count > 0:
+                return loss.sum() / effective_count
+            else:
+                return loss.sum()  # 避免除零
         elif self.reduction == 'sum':
             return loss.sum()
         else:
@@ -260,12 +270,17 @@ if __name__ == "__main__":
     print("\nTesting MultiTask Loss...")
     svo_logits = torch.randn(batch_size, seq_len, 7)
     svo_labels = torch.zeros(batch_size, seq_len, dtype=torch.long)
+    sent_logits = torch.randn(batch_size, 2)
+    sent_labels = torch.ones(batch_size, dtype=torch.long)  # 假设都有错
     
-    mtl_loss = MultiTaskLoss(focal_alpha=0.25, focal_gamma=2.0, mtl_lambda=0.5)
-    total_loss, gec_loss, svo_loss = mtl_loss(
-        logits, svo_logits, targets, svo_labels, label_mask
+    mtl_loss = MultiTaskLoss(focal_alpha=0.25, focal_gamma=2.0, mtl_lambda_svo=0.5, mtl_lambda_sent=0.3)
+    total_loss, gec_loss, svo_loss, sent_loss = mtl_loss(
+        logits, svo_logits, sent_logits,
+        targets, svo_labels, sent_labels,
+        label_mask
     )
     
     print(f"Total Loss: {total_loss.item():.4f}")
     print(f"GEC Loss: {gec_loss.item():.4f}")
     print(f"SVO Loss: {svo_loss.item():.4f}")
+    print(f"Sent Loss: {sent_loss.item():.4f}")

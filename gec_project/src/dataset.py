@@ -29,6 +29,7 @@ class GECDataset(Dataset):
         "tokens": ["通", "过", ...],
         "gec_labels": ["$KEEP", "$KEEP", ..., "$DELETE", ...],
         "svo_labels": ["O", "O", ..., "B-SUB", ...]
+        "sent_has_error": 1或0
     }
     
     输出格式 (Tensor):
@@ -178,6 +179,15 @@ def build_label_maps(vocab_dir: str) -> Tuple[Dict, Dict]:
         gec_labels = [line.strip() for line in f]
     gec_label_map = {label: idx for idx, label in enumerate(gec_labels)}
     
+    # **关键验证**：确保 $KEEP 的 ID 是 0
+    keep_id = gec_label_map.get(cfg.GEC_KEEP_LABEL)
+    if keep_id != 0:
+        raise ValueError(
+            f"Critical Error: {cfg.GEC_KEEP_LABEL} must have ID 0, but got ID {keep_id}. "
+            f"This will cause FocalLoss and metrics to fail. "
+            f"Please regenerate label_map.txt using preprocess.py"
+        )
+    
     # 加载SVO标签
     svo_label_path = f"{vocab_dir}/svo_labels.txt"
     with open(svo_label_path, 'r', encoding='utf-8') as f:
@@ -185,6 +195,7 @@ def build_label_maps(vocab_dir: str) -> Tuple[Dict, Dict]:
     svo_label_map = {label: idx for idx, label in enumerate(svo_labels)}
     
     logger.info(f"Loaded {len(gec_label_map)} GEC labels and {len(svo_label_map)} SVO labels")
+    logger.info(f"Verified: {cfg.GEC_KEEP_LABEL} has ID {keep_id}")
     
     return gec_label_map, svo_label_map
 

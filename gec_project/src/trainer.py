@@ -86,6 +86,7 @@ class GECTrainer:
         total_loss = 0.0
         total_gec_loss = 0.0
         total_svo_loss = 0.0
+        total_sent_loss = 0.0
         
         progress_bar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}")
         
@@ -95,21 +96,23 @@ class GECTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             gec_labels = batch['gec_labels'].to(self.device)
             svo_labels = batch['svo_labels'].to(self.device)
+            sent_labels = batch['sent_label'].to(self.device)
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播
-            gec_logits, svo_logits = self.model(
+            gec_logits, svo_logits, sent_logits = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 gec_labels=gec_labels,
                 svo_labels=svo_labels,
+                sent_labels=sent_labels,
                 label_mask=label_mask
             )
             
             # 计算损失
-            loss, gec_loss, svo_loss = self.criterion(
-                gec_logits, svo_logits,
-                gec_labels, svo_labels,
+            loss, gec_loss, svo_loss, sent_loss = self.criterion(
+                gec_logits, svo_logits, sent_logits,
+                gec_labels, svo_labels, sent_labels,
                 label_mask
             )
             
@@ -130,12 +133,14 @@ class GECTrainer:
             total_loss += loss.item()
             total_gec_loss += gec_loss.item()
             total_svo_loss += svo_loss.item()
+            total_sent_loss += sent_loss.item()
             
             # 更新进度条
             progress_bar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'gec': f"{gec_loss.item():.4f}",
                 'svo': f"{svo_loss.item():.4f}",
+                'sent': f"{sent_loss.item():.4f}",
                 'lr': f"{self.scheduler.get_last_lr()[0]:.2e}"
             })
             
@@ -146,16 +151,19 @@ class GECTrainer:
                 self.writer.add_scalar('train/loss', loss.item(), self.global_step)
                 self.writer.add_scalar('train/gec_loss', gec_loss.item(), self.global_step)
                 self.writer.add_scalar('train/svo_loss', svo_loss.item(), self.global_step)
+                self.writer.add_scalar('train/sent_loss', sent_loss.item(), self.global_step)
         
         # 计算平均损失
         avg_loss = total_loss / len(self.train_loader)
         avg_gec_loss = total_gec_loss / len(self.train_loader)
         avg_svo_loss = total_svo_loss / len(self.train_loader)
+        avg_sent_loss = total_sent_loss / len(self.train_loader)
         
         return {
             'loss': avg_loss,
             'gec_loss': avg_gec_loss,
-            'svo_loss': avg_svo_loss
+            'svo_loss': avg_svo_loss,
+            'sent_loss': avg_sent_loss
         }
     
     @torch.no_grad()
@@ -176,18 +184,19 @@ class GECTrainer:
             attention_mask = batch['attention_mask'].to(self.device)
             gec_labels = batch['gec_labels'].to(self.device)
             svo_labels = batch['svo_labels'].to(self.device)
+            sent_labels = batch['sent_label'].to(self.device)
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播
-            gec_logits, svo_logits = self.model(
+            gec_logits, svo_logits, sent_logits = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask
             )
             
             # 计算损失
-            loss, _, _ = self.criterion(
-                gec_logits, svo_logits,
-                gec_labels, svo_labels,
+            loss, _, _, _ = self.criterion(
+                gec_logits, svo_logits, sent_logits,
+                gec_labels, svo_labels, sent_labels,
                 label_mask
             )
             total_loss += loss.item()
@@ -399,7 +408,8 @@ def main():
     criterion = MultiTaskLoss(
         focal_alpha=cfg.FOCAL_LOSS_ALPHA,
         focal_gamma=cfg.FOCAL_LOSS_GAMMA,
-        mtl_lambda=cfg.MTL_LAMBDA
+        mtl_lambda_svo=cfg.MTL_LAMBDA_SVO,
+        mtl_lambda_sent=cfg.MTL_LAMBDA_SENT
     )
     
     # 创建实验目录

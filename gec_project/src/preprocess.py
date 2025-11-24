@@ -272,6 +272,9 @@ def build_gec_label_vocab(samples: List[Dict], output_path: Path):
     构建GEC标签词表
     
     收集所有出现过的GEC标签
+    
+    **重要**：强制将 $KEEP 放在第 0 位，确保其 ID 为 0
+    这对于 FocalLoss 和评估指标的正确性至关重要
     """
     label_set = set()
     label_set.add(cfg.GEC_KEEP_LABEL)
@@ -281,8 +284,10 @@ def build_gec_label_vocab(samples: List[Dict], output_path: Path):
         for label in sample['gec_labels']:
             label_set.add(label)
     
-    # 排序并保存
-    labels = sorted(list(label_set))
+    # **关键修改**：确保 $KEEP 在第一位，其余按字母顺序排列
+    # 先移除 $KEEP，排序其他标签，然后将 $KEEP 放在开头
+    label_set.discard(cfg.GEC_KEEP_LABEL)
+    labels = [cfg.GEC_KEEP_LABEL] + sorted(list(label_set))
     
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -290,6 +295,7 @@ def build_gec_label_vocab(samples: List[Dict], output_path: Path):
             f.write(label + '\n')
     
     logger.info(f"Built GEC label vocab with {len(labels)} labels, saved to {output_path}")
+    logger.info(f"$KEEP label is at index 0: {labels[0] == cfg.GEC_KEEP_LABEL}")
 
 
 def build_svo_label_vocab(output_path: Path):

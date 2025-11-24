@@ -57,7 +57,8 @@ MAX_GRAD_NORM = 1.0
 # 损失函数参数
 FOCAL_LOSS_GAMMA = 2.0      # Focal Loss的聚焦参数
 FOCAL_LOSS_ALPHA = 0.25     # 针对$KEEP标签的权重
-MTL_LAMBDA = 0.5            # 多任务学习中SVO任务的权重
+MTL_LAMBDA_SVO = 0.5        # 多任务学习中SVO任务的权重
+MTL_LAMBDA_SENT = 0.3       # 多任务学习中句级错误检测任务的权重
 
 # Early Stopping
 PATIENCE = 5  # 验证集连续5个epoch没提升就停止
@@ -207,7 +208,8 @@ class Config:
         # 损失函数配置
         self.FOCAL_LOSS_GAMMA = self.focal_gamma = self.focal_loss_gamma = FOCAL_LOSS_GAMMA
         self.FOCAL_LOSS_ALPHA = self.focal_alpha = self.focal_loss_alpha = FOCAL_LOSS_ALPHA
-        self.MTL_LAMBDA = self.mtl_lambda = MTL_LAMBDA
+        self.MTL_LAMBDA_SVO = self.mtl_lambda_svo = MTL_LAMBDA_SVO
+        self.MTL_LAMBDA_SENT = self.mtl_lambda_sent = MTL_LAMBDA_SENT
         
         # Early Stopping
         self.PATIENCE = self.patience = PATIENCE

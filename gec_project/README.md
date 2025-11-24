@@ -80,9 +80,6 @@ python deploy/export_onnx.py --model_path experiments/best_model.pt
 - **损失函数**: Focal Loss + CrossEntropy
 - **优化器**: AdamW with Warmup
 
-## 数据格式说明
-
-详见 [SPECIFICATION.md](../SPECIFICATION.md) 第3章节。
 
 ## 性能指标
 
@@ -95,16 +92,9 @@ python deploy/export_onnx.py --model_path experiments/best_model.pt
 ## 开发计划
 
 - [x] 项目框架搭建
-- [ ] 数据预处理管道
+- [x] 数据预处理管道
 - [ ] 模型训练代码
 - [ ] 推理和评估
 - [ ] 模型量化和部署
 - [ ] 论文撰写
 
-## License
-
-MIT
-
-## 联系方式
-
-如有问题请提Issue。
