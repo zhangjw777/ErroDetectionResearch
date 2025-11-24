@@ -1,0 +1,7 @@
+O
+B-SUB
+I-SUB
+B-PRED
+I-PRED
+B-OBJ
+I-OBJ

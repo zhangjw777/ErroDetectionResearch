@@ -1,0 +1,33 @@
+# 核心依赖
+torch
+transformers
+datasets
+
+# 句法分析
+ltp>=4.2.0
+# 数据处理
+numpy
+pandas
+scikit-learn
+
+# 配置管理
+pyyaml
+omegaconf
+
+# 日志和监控
+tensorboard
+tqdm
+wandb  # 可选，用于实验跟踪
+
+# 推理加速
+onnx
+onnxruntime
+
+# 工具
+jieba
+pypinyin
+
+# 开发工具
+pytest
+black
+flake8
