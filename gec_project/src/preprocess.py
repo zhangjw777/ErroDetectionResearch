@@ -109,6 +109,13 @@ def clean_html_tags(text: str) -> str:
     text = re.sub(r'&[a-zA-Z]+;', ' ', text)
     text = re.sub(r'&#\d+;', ' ', text)
     
+    # 删除零宽字符和其他不可见Unicode控制字符
+    # U+200B: 零宽空格, U+200C: 零宽非连接符, U+200D: 零宽连接符
+    # U+FEFF: 零宽非断空格(BOM), U+00AD: 软连字符
+    zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
+    for char in zero_width_chars:
+        text = text.replace(char, '')
+    
     # 删除多余空白字符
     text = re.sub(r'\s+', ' ', text)
     text = text.strip()
@@ -354,52 +361,93 @@ def generate_training_data(
     
     # 生成错误样本
     for sent_id, correct_sent in enumerate(tqdm(clean_sentences, desc="Generating samples")):
-        # 1. 获取 Target (正确句) 的 Token 和 SVO 骨架
-        target_tokens, target_svo_labels = svo_extractor.extract(correct_sent)
+        # 预处理: 去除可能导致LTP解析问题的不可见字符
+        # LTP在分词时会自动过滤零宽字符,导致token拼接后与原句不一致
+        zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
+        for char in zero_width_chars:
+            correct_sent = correct_sent.replace(char, '')
+        correct_sent = correct_sent.strip()
         
-        # 先加一条“无错句”样本（句级负样本）
-        assert ''.join(target_tokens) == correct_sent
-        assert len(target_svo_labels) == len(correct_sent)
+        # 跳过空句子或过短的句子
+        if len(correct_sent) < 10:
+            continue
+        
+        try:
+            # 1. 获取 Target (正确句) 的 Token 和 SVO 骨架
+            target_tokens, target_svo_labels = svo_extractor.extract(correct_sent)
+            
+            # 先加一条"无错句"样本（句级负样本）
+            assert ''.join(target_tokens) == correct_sent, (
+                f"Token拼接失败 (sent_id={sent_id}):\n"
+                f"  原句长度: {len(correct_sent)}\n"
+                f"  原句: {correct_sent[:100]}...\n"
+                f"  Token数: {len(target_tokens)}\n"
+                f"  拼接长度: {len(''.join(target_tokens))}\n"
+                f"  拼接结果: {''.join(target_tokens)[:100]}..."
+            )
+            assert len(target_svo_labels) == len(correct_sent), (
+                f"SVO标签长度不匹配 (sent_id={sent_id}): "
+                f"labels={len(target_svo_labels)}, sent={len(correct_sent)}"
+            )
+        except AssertionError as e:
+            logger.error(f"句子 {sent_id} 处理失败: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"句子 {sent_id} 发生异常: {e}")
+            continue
+        
         clean_sample = {
-        'uid': f'sent_{sent_id}_clean',
-        'text': correct_sent,
-        'tokens': list(correct_sent),
-        'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
-        'svo_labels': target_svo_labels,
-        'sent_has_error': 0
+            'uid': f'sent_{sent_id}_clean',
+            'text': correct_sent,
+            'tokens': list(correct_sent),
+            'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
+            'svo_labels': target_svo_labels,
+            'sent_has_error': 0
         }
         all_samples.append(clean_sample)
+        
         for sample_id in range(num_samples_per_sentence):
-            # 2. 生成 Source (错句)
-            error_sent, errors = error_gen.generate_errors(correct_sent, max_errors=2)
+            try:
+                # 2. 生成 Source (错句)
+                error_sent, errors = error_gen.generate_errors(correct_sent, max_errors=2)
+                
+                if not errors or error_sent == correct_sent:
+                    continue
+                
+                source_tokens = list(error_sent)
+                
+                # 3. 对齐并投射标签
+                # 关键点：直接把 target_svo_labels 传进去进行投射
+                gec_labels, source_svo_labels = align_tokens_with_difflib(
+                    source_tokens, 
+                    target_tokens, 
+                    target_svo_labels
+                )
+                
+                # 4. 长度对齐检查 (Double Check)
+                assert len(gec_labels) == len(source_tokens), (
+                    f"GEC label len mismatch (sent_id={sent_id}, sample_id={sample_id}): "
+                    f"{len(gec_labels)} vs {len(source_tokens)}"
+                )
+                assert len(source_svo_labels) == len(source_tokens), (
+                    f"SVO label len mismatch (sent_id={sent_id}, sample_id={sample_id}): "
+                    f"{len(source_svo_labels)} vs {len(source_tokens)}"
+                )
+                
+                sample = {
+                    'uid': f'sent_{sent_id}_sample_{sample_id}',
+                    'text': error_sent,
+                    'tokens': source_tokens,
+                    'gec_labels': gec_labels,
+                    'svo_labels': source_svo_labels,
+                    'sent_has_error': 1
+                }
+                
+                all_samples.append(sample)
             
-            if not errors or error_sent == correct_sent:
+            except Exception as e:
+                logger.warning(f"生成错误样本失败 (sent_id={sent_id}, sample_id={sample_id}): {e}")
                 continue
-            
-            source_tokens = list(error_sent)
-            
-            # 3. 对齐并投射标签
-            # 关键点：直接把 target_svo_labels 传进去进行投射
-            gec_labels, source_svo_labels = align_tokens_with_difflib(
-                source_tokens, 
-                target_tokens, 
-                target_svo_labels
-            )
-            
-            # 4. 长度对齐检查 (Double Check)
-            assert len(gec_labels) == len(source_tokens), f"GEC label len mismatch: {len(gec_labels)} vs {len(source_tokens)}"
-            assert len(source_svo_labels) == len(source_tokens), f"SVO label len mismatch: {len(source_svo_labels)} vs {len(source_tokens)}"
-            
-            sample = {
-                'uid': f'sent_{sent_id}_sample_{sample_id}',
-                'text': error_sent,
-                'tokens': source_tokens,
-                'gec_labels': gec_labels,
-                'svo_labels': source_svo_labels,
-                'sent_has_error': 1
-            }
-            
-            all_samples.append(sample)
     
     logger.info(f"Generated {len(all_samples)} samples")
     
