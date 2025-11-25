@@ -437,8 +437,28 @@ def main():
                        help="Output directory for training data")
     parser.add_argument('--num_samples', type=int, default=2,
                        help="Number of error samples per sentence")
+    parser.add_argument('--use_cuda', action='store_true', default=False,
+                       help="Use GPU for SVO extraction (requires CUDA)")
+    parser.add_argument('--max_sentences', type=int, default=None,
+                       help="Maximum number of sentences to process (default: None, process all)")
     
     args = parser.parse_args()
+    
+    # 检测GPU可用性
+    try:
+        import torch
+        if args.use_cuda and torch.cuda.is_available():
+            use_cuda = True
+            logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        elif args.use_cuda and not torch.cuda.is_available():
+            use_cuda = False
+            logger.warning("CUDA requested but not available, falling back to CPU")
+        else:
+            use_cuda = False
+            logger.info("Using CPU for SVO extraction")
+    except ImportError:
+        use_cuda = False
+        logger.warning("PyTorch not found, using CPU")
     
     # 1. 清洗数据 
     clean_path = cfg.CLEAN_DATA_DIR / 'clean_sentences.txt'
@@ -456,11 +476,18 @@ def main():
     logger.info(f"Loaded {len(clean_sentences)} clean sentences")
     
     # 2. 生成训练数据
+    if args.max_sentences is None:
+        num_to_process = len(clean_sentences)
+        logger.info(f"Processing all {num_to_process} sentences with GPU={'enabled' if use_cuda else 'disabled'}")
+    else:
+        num_to_process = min(len(clean_sentences), args.max_sentences)
+        logger.info(f"Processing {num_to_process} / {len(clean_sentences)} sentences with GPU={'enabled' if use_cuda else 'disabled'}")
+    
     generate_training_data(
-        clean_sentences[:1000],  # 先用1000句测试
+        clean_sentences[:num_to_process],
         output_dir=Path(args.output_dir),
         num_samples_per_sentence=args.num_samples,
-        use_cuda=False  # 使用CPU处理
+        use_cuda=use_cuda  # 使用命令行参数控制
     )
     
     logger.info("Data preprocessing completed!")

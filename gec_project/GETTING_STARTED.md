@@ -39,10 +39,39 @@ pip install -r requirements.txt
 ```
 
 ### 3. 数据预处理
+
+**CPU模式**（较慢）:
 ```bash
 cd gec_project
 python src/preprocess.py
 ```
+
+**GPU模式（推荐，快10-20倍）**:
+```bash
+# 处理所有句子（默认）
+python src/preprocess.py --use_cuda
+
+# 只处理前5000个句子（用于快速测试）
+python src/preprocess.py --use_cuda --max_sentences 5000
+```
+
+**CPU模式**（较慢，适合小规模测试）:
+```bash
+# 只处理1000个句子
+python src/preprocess.py --max_sentences 1000
+```
+
+**完整参数说明**:
+```bash
+python src/preprocess.py --use_cuda --max_sentences 5000 --num_samples 3
+```
+
+可用参数：
+- `--use_cuda`: 使用GPU加速SVO提取（需要CUDA环境）
+- `--max_sentences`: 处理的句子数量（默认：None，处理全部）
+- `--num_samples`: 每个句子生成的错误样本数（默认：2）
+- `--raw_dir`: 原始数据目录（默认：data/raw）
+- `--output_dir`: 输出目录（默认：data/synthetic）
 
 ### 4. 训练模型
 ```bash

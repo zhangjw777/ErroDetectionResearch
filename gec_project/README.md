@@ -36,10 +36,20 @@ gec_project/
 
 ## 快速开始
 
+### 0. 环境检测（推荐）
+
+```bash
+# 运行环境检测脚本，检查依赖是否安装正确
+python check_env.py
+```
+
 ### 1. 环境安装
 
 ```bash
 pip install -r requirements.txt
+
+# 如需GPU加速，安装CUDA版本的PyTorch
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
 ### 2. 数据准备
@@ -48,6 +58,12 @@ pip install -r requirements.txt
 
 ### 3. 数据预处理
 
+**使用GPU加速（推荐）**：
+```bash
+python src/preprocess.py --use_cuda --max_sentences 10000
+```
+
+**使用CPU**：
 ```bash
 # 清洗语料并生成训练数据
 python src/utils/preprocess.py
