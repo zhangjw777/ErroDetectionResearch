@@ -21,7 +21,7 @@ BERT_MODEL = "hfl/chinese-macbert-base"  # 使用MacBERT作为基础模型
 BERT_HIDDEN_SIZE = 768
 
 # 序列长度
-MAX_SEQ_LENGTH = 128  # 公文句子一般不会太长，128足够
+MAX_SEQ_LENGTH = 192  
 
 # ==================== 标签配置 ====================
 # GECToR标签
@@ -74,9 +74,9 @@ ENABLE_LABEL_COMPRESSION = True  # 是否启用标签压缩（建议在标签词
 
 # ==================== 训练配置 ====================
 # 基础训练参数
-BATCH_SIZE = 32
-NUM_EPOCHS = 20
-LEARNING_RATE = 3e-5
+BATCH_SIZE = 128
+NUM_EPOCHS = 8
+LEARNING_RATE = 2e-5
 WARMUP_RATIO = 0.1
 WEIGHT_DECAY = 0.01
 MAX_GRAD_NORM = 1.0
@@ -88,7 +88,7 @@ MTL_LAMBDA_SVO = 0.5        # 多任务学习中SVO任务的权重
 MTL_LAMBDA_SENT = 0.5       # 多任务学习中句级错误检测任务的权重
 
 # Early Stopping
-PATIENCE = 5  # 验证集连续5个epoch没提升就停止
+PATIENCE = 3  # 验证集连续3个epoch没提升就停止
 MIN_DELTA = 0.001  # 最小改善幅度
 
 # ==================== 数据增强配置 ====================
@@ -98,6 +98,28 @@ AUG_WORD_ORDER_ERROR_RATE = 0.10    # 词序错误比例
 AUG_CONFUSION_ERROR_RATE = 0.20     # 混淆词错误比例
 AUG_DELETION_ERROR_RATE = 0.10      # 删除错误比例
 AUG_INSERTION_ERROR_RATE = 0.10     # 插入错误比例
+# ==================== 评估配置 ====================
+# 评估指标的Beta值
+EVAL_F_BETA = 0.5  # F0.5强调Precision，但我们主要关注Recall
+EVAL_F2_BETA = 2.0  # F2强调Recall
+
+# ==================== 部署配置 ====================
+# 量化配置
+QUANTIZATION_DTYPE = "qint8"  # INT8量化
+ONNX_OPSET_VERSION = 14
+
+# 推理配置
+INFERENCE_BATCH_SIZE = 1  # 部署时单句推理
+INFERENCE_DEVICE = "cpu"  # 默认CPU推理
+
+# ==================== 日志配置 ====================
+LOG_INTERVAL = 100  # 每100个batch打印一次日志
+SAVE_INTERVAL = 1   # 每1个epoch保存一次模型
+TENSORBOARD_DIR = EXPERIMENTS_DIR / "tensorboard"
+
+# ==================== GPU配置 ====================
+USE_CUDA = True  # 是否使用GPU（如果可用）
+NUM_WORKERS = 4  # DataLoader的worker数量
 
 # 公文特有词汇（用于构建混淆集和介词集）
 PREPOSITIONS = ["通过", "经过", "在", "由于", "鉴于", "根据",
@@ -169,28 +191,7 @@ POLITICAL_CONFUSIONS = {
     "公布": "颁布",
 }
 
-# ==================== 评估配置 ====================
-# 评估指标的Beta值
-EVAL_F_BETA = 0.5  # F0.5强调Precision，但我们主要关注Recall
-EVAL_F2_BETA = 2.0  # F2强调Recall
 
-# ==================== 部署配置 ====================
-# 量化配置
-QUANTIZATION_DTYPE = "qint8"  # INT8量化
-ONNX_OPSET_VERSION = 14
-
-# 推理配置
-INFERENCE_BATCH_SIZE = 1  # 部署时单句推理
-INFERENCE_DEVICE = "cpu"  # 默认CPU推理
-
-# ==================== 日志配置 ====================
-LOG_INTERVAL = 100  # 每100个batch打印一次日志
-SAVE_INTERVAL = 1   # 每1个epoch保存一次模型
-TENSORBOARD_DIR = EXPERIMENTS_DIR / "tensorboard"
-
-# ==================== GPU配置 ====================
-USE_CUDA = True  # 是否使用GPU（如果可用）
-NUM_WORKERS = 4  # DataLoader的worker数量
 
 
 class Config:

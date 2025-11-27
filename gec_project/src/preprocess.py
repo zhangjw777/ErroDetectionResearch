@@ -391,72 +391,98 @@ def build_svo_label_vocab(output_path: Path):
 
 
 def generate_training_data(clean_sentences: List[str], output_dir: Path, train_ratio: float = 0.9, num_samples_per_sentence: int = 2, use_cuda: bool = False):
-    """生成训练数据"""
+    """
+    生成训练数据
+    
+    重要改进：先在原始干净句子层面划分 train/dev，然后在各自子集上做错误生成。
+    这样可以避免同一原始句子的"正确版"和"错误版"分别出现在 train 和 dev 中，
+    从而防止信息泄漏导致 dev 指标偏乐观。
+    """
     error_gen = ErrorGenerator()
     svo_extractor = SVOExtractor(use_cuda=use_cuda)
-    all_samples = []
     
-    for sent_id, correct_sent in enumerate(tqdm(clean_sentences, desc="Generating samples")):
-        # === 兜底清洗 (Double Check) ===
-        # 即使从文件中读取，也再过一遍过滤器，防止旧数据污染
-        correct_sent = clean_and_filter_sentence(correct_sent)
-        if not correct_sent:
-            continue
-            
-        # 去除零宽字符
-        zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
-        for char in zero_width_chars:
-            correct_sent = correct_sent.replace(char, '')
-        
-        try:
-            # 1. 获取 Target (正确句)
-            target_tokens, target_svo_labels = svo_extractor.extract(correct_sent)
-            
-            if ''.join(target_tokens) != correct_sent:
+    # === 关键改进：先在句子层面划分 train/dev ===
+    # 打乱句子顺序，确保划分的随机性
+    sentences_shuffled = clean_sentences.copy()
+    random.shuffle(sentences_shuffled)
+    
+    split_idx = int(len(sentences_shuffled) * train_ratio)
+    train_sentences = sentences_shuffled[:split_idx]
+    dev_sentences = sentences_shuffled[split_idx:]
+    
+    logger.info(f"Split sentences: Train={len(train_sentences)}, Dev={len(dev_sentences)}")
+    
+    def generate_samples_for_split(sentences: List[str], split_name: str, start_id: int = 0) -> List[Dict]:
+        """为给定的句子集合生成样本"""
+        samples = []
+        for local_id, correct_sent in enumerate(tqdm(sentences, desc=f"Generating {split_name} samples")):
+            sent_id = start_id + local_id
+            # === 兜底清洗 (Double Check) ===
+            # 即使从文件中读取，也再过一遍过滤器，防止旧数据污染
+            correct_sent = clean_and_filter_sentence(correct_sent)
+            if not correct_sent:
                 continue
-
-            # 加入正确样本
-            clean_sample = {
-                'uid': f'sent_{sent_id}_clean',
-                'text': correct_sent,
-                'tokens': list(correct_sent),
-                'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
-                'svo_labels': target_svo_labels,
-                'sent_has_error': 0
-            }
-            all_samples.append(clean_sample)
+                
+            # 去除零宽字符
+            zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
+            for char in zero_width_chars:
+                correct_sent = correct_sent.replace(char, '')
             
-            # 2. 生成错误样本
-            for sample_id in range(num_samples_per_sentence):
-                error_sent, errors = error_gen.generate_errors(correct_sent, max_errors=2)
+            try:
+                # 1. 获取 Target (正确句)
+                target_tokens, target_svo_labels = svo_extractor.extract(correct_sent)
                 
-                if not errors or error_sent == correct_sent:
-                    continue
-                
-                source_tokens = list(error_sent)
-                gec_labels, source_svo_labels = align_tokens_with_difflib(source_tokens, target_tokens, target_svo_labels)
-                
-                if len(gec_labels) != len(source_tokens):
+                if ''.join(target_tokens) != correct_sent:
                     continue
 
-                sample = {
-                    'uid': f'sent_{sent_id}_sample_{sample_id}',
-                    'text': error_sent,
-                    'tokens': source_tokens,
-                    'gec_labels': gec_labels,
-                    'svo_labels': source_svo_labels,
-                    'sent_has_error': 1
+                # 加入正确样本
+                clean_sample = {
+                    'uid': f'sent_{sent_id}_clean',
+                    'text': correct_sent,
+                    'tokens': list(correct_sent),
+                    'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
+                    'svo_labels': target_svo_labels,
+                    'sent_has_error': 0
                 }
-                all_samples.append(sample)
-            
-        except Exception as e:
-            continue
+                samples.append(clean_sample)
+                
+                # 2. 生成错误样本
+                for sample_id in range(num_samples_per_sentence):
+                    error_sent, errors = error_gen.generate_errors(correct_sent, max_errors=2)
+                    
+                    if not errors or error_sent == correct_sent:
+                        continue
+                    
+                    source_tokens = list(error_sent)
+                    gec_labels, source_svo_labels = align_tokens_with_difflib(source_tokens, target_tokens, target_svo_labels)
+                    
+                    if len(gec_labels) != len(source_tokens):
+                        continue
+
+                    sample = {
+                        'uid': f'sent_{sent_id}_sample_{sample_id}',
+                        'text': error_sent,
+                        'tokens': source_tokens,
+                        'gec_labels': gec_labels,
+                        'svo_labels': source_svo_labels,
+                        'sent_has_error': 1
+                    }
+                    samples.append(sample)
+                
+            except Exception as e:
+                continue
+        
+        return samples
     
-    # 划分与保存
-    random.shuffle(all_samples)
-    split_idx = int(len(all_samples) * train_ratio)
-    train_samples = all_samples[:split_idx]
-    dev_samples = all_samples[split_idx:]
+    # === 分别为 train 和 dev 生成样本 ===
+    train_samples = generate_samples_for_split(train_sentences, "train", start_id=0)
+    dev_samples = generate_samples_for_split(dev_sentences, "dev", start_id=len(train_sentences))
+    
+    # 在各自集合内打乱顺序（可选，但推荐）
+    random.shuffle(train_samples)
+    random.shuffle(dev_samples)
+    
+    all_samples = train_samples + dev_samples
     
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / 'train.json', 'w', encoding='utf-8') as f:
@@ -495,9 +521,15 @@ def main():
     # 总是重新清洗，确保使用最新规则
     clean_sentences = clean_raw_data(Path(args.raw_dir), clean_path)
     
-    # 2. Generate Data
+    # 2. 随机采样（解决采样偏差问题）
+    # clean_raw_data 返回的是按字面排序的句子，直接截断会偏向某些开头字符的句子
+    # 先打乱再截断，确保子集是随机采样
     if args.max_sentences:
+        random.shuffle(clean_sentences)
         clean_sentences = clean_sentences[:args.max_sentences]
+        logger.info(f"Randomly sampled {len(clean_sentences)} sentences")
+    
+    # 3. Generate Data
         
     generate_training_data(
         clean_sentences,
