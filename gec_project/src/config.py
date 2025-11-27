@@ -121,6 +121,10 @@ TENSORBOARD_DIR = EXPERIMENTS_DIR / "tensorboard"
 USE_CUDA = True  # 是否使用GPU（如果可用）
 NUM_WORKERS = 4  # DataLoader的worker数量
 
+# ==================== 混合精度与分布式训练配置 ====================
+USE_AMP = True  # 是否启用混合精度训练 (FP16)，4090上强烈建议开启
+GRADIENT_ACCUMULATION_STEPS = 1  # 梯度累积步数，增大等效batch_size
+
 # 公文特有词汇（用于构建混淆集和介词集）
 PREPOSITIONS = ["通过", "经过", "在", "由于", "鉴于", "根据",
                 "依据", "按照", "依照", "遵照", "据", "特别是",
@@ -271,6 +275,10 @@ class Config:
         # GPU配置
         self.USE_CUDA = self.use_cuda = USE_CUDA
         self.NUM_WORKERS = self.num_workers = NUM_WORKERS
+        
+        # 混合精度与分布式训练配置
+        self.USE_AMP = self.use_amp = USE_AMP
+        self.GRADIENT_ACCUMULATION_STEPS = self.gradient_accumulation_steps = GRADIENT_ACCUMULATION_STEPS
         
     def to_dict(self):
         """转换为字典，方便保存和序列化"""
