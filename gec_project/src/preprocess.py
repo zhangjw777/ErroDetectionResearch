@@ -1,7 +1,7 @@
 """
-数据预处理脚本
+数据预处理脚本 (最终融合版)
 功能：
-1. 清洗原始公文语料
+1. 清洗原始公文语料 (高精度去噪 + 强力过滤)
 2. 生成错误样本
 3. 生成SVO标签
 4. 构建GECToR标签映射
@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from tqdm import tqdm
 import logging
-from typing import List, Dict, Iterable, Tuple
+from typing import List, Dict, Iterable, Tuple, Optional
 import argparse
 import difflib
 
@@ -21,11 +21,187 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from config import default_config as cfg
-from utils.augmentation import ErrorGenerator, generate_training_samples
+from utils.augmentation import ErrorGenerator
 from utils.svo_extract import SVOExtractor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==========================================
+# 核心清洗工具模块 (Fusion Edition)
+# ==========================================
+
+# 1. 常量定义
+CONTACT_KEYWORDS = (
+    '联系人', '联系电话', '邮箱', '电子邮箱', '邮箱地址',
+    '邮寄地址', '传真', 'QQ', '微信', '咨询电话', '监督电话'
+)
+
+ADDRESS_KEYWORDS = (
+    '省', '市', '区', '县', '乡', '镇', '村',
+    '街道', '路', '巷', '号', '栋', '室',
+    '大厦', '园', '楼', '单元', '层'
+)
+
+# 2. 正则预编译
+PHONE_PAT  = re.compile(r'(1[3-9]\d{9})|(\d{3,4}-\d{7,8})')
+EMAIL_PAT  = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,6}')
+# 使用 [URL] 替换，避免 <URL> 被 BERT 分词器切碎
+URL_PAT    = re.compile(r'https?://[^\s)）]+')
+# 去除起止的引号（中文或英文）
+QUOTES_PAT = re.compile(r'^[\'"“”]+|[\'"“”]+$')
+# 汉字匹配
+CHINESE_CHAR_PAT = re.compile(r'[\u4e00-\u9fa5]')
+
+
+def _strip_leading_meta(text: str) -> str:
+    """
+    剥离句子起始的元数据（版式、署名、时间、枚举）
+    采用 While 循环模式 + Copilot 的高精度正则
+    解决嵌套前缀问题，例如："(责任单位：xxx) 22. 加强..." -> "22. 加强..." -> "加强..."
+    """
+    prev_text = None
+    curr_text = text.strip()
+    
+    # 限制最大循环次数，防止死循环
+    loop_count = 0
+    while prev_text != curr_text and loop_count < 6:
+        prev_text = curr_text
+        t = curr_text
+        
+        # 1) 起始括注：全角（）/[]/【】块
+        # 使用非贪婪匹配，防止吃掉正文
+        t = re.sub(r'^(（[^）]{1,60}）\s*)', '', t)
+        t = re.sub(r'^(\[[^\]]{1,60}\]\s*)', '', t)
+        t = re.sub(r'^【[^】]{1,30}】\s*', '', t)
+        
+        # 2) 起始日期时间（支持 2 位或 4 位年份）
+        # 匹配: 2024-03-29 15:54:07 郭启文
+        t = re.sub(
+            r'^\s*\d{2,4}[-/年]\d{1,2}[-/月]\d{1,2}'
+            r'(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\s*',
+            '', 
+            t
+        )
+        
+        # 3) 记者 / 报纸署名 / 图片署名
+        # 匹配: "□记者...", "本报...讯", "新华社记者.../摄"
+        t = re.sub(r'^□?记者[\u4e00-\u9fa5\s]{0,10}(报道|报导)\s*', '', t)
+        t = re.sub(r'^(?:新华社记者|中国质量报[^：:]{0,20}记者站记者|本报[^：:]{0,20}讯)[:：]?\s*', '', t)
+        t = re.sub(r'^[^，。；：:]{0,12}?报道[：:\s]*', '', t) # 开头的「xxx报道」
+        
+        # 4) 责任单位 / 来源前缀
+        t = re.sub(r'^(责任单位|发布单位|来源|作者)[:：]\s*[^，。；]{1,30}[，。；]?\s*', '', t)
+        
+        # 5) 起始枚举标记（第X、（一）、1. 等）
+        t = re.sub(r'^((第?[一二三四五六七八九十百千万]+[、.，,])|（[一二三四五六七八九十]+）|[(（]?\d{1,3}[)）]?[\.、])\s*', '', t)
+        
+        curr_text = t.strip()
+        loop_count += 1
+        
+    # 额外清理：文中可能残留的图片署名 "xxx/摄"
+    curr_text = re.sub(r'\s*[\u4e00-\u9fa5]{1,6}/摄\s*', '', curr_text)
+    curr_text = re.sub(r'\s*新华社记者[\u4e00-\u9fa5\s]{0,10}/摄', '', curr_text)
+    
+    return curr_text
+
+
+def normalize_sentence(text: str) -> str:
+    """句子规范化主入口：去壳保句"""
+    if not text:
+        return ""
+    
+    # 1. HTML 清洗 (防止漏网之鱼)
+    t = clean_html_tags(text)
+    
+    # 2. 剥离前缀噪声 (洋葱剥皮)
+    t = _strip_leading_meta(t)
+    
+    # 3. 去掉起止引号
+    t = QUOTES_PAT.sub('', t)
+    
+    # 4. URL 归一化 (使用 [URL] 更安全)
+    t = URL_PAT.sub('[URL]', t)
+    
+    # 5. 压缩空白
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def should_filter_sentence_core(text: str) -> bool:
+    """
+    在已经 normalize 后的句子上做噪声过滤
+    返回 True 表示需要丢弃
+    """
+    if not text:
+        return True
+
+    # 预计算统计量
+    total_len = max(1, len(text))
+    digit_count = sum(ch.isdigit() for ch in text)
+    digit_ratio = digit_count / total_len
+    chinese_chars = len(CHINESE_CHAR_PAT.findall(text))
+    
+    contact_hits = sum(1 for k in CONTACT_KEYWORDS if k in text)
+    has_phone = bool(PHONE_PAT.search(text))
+    has_email = bool(EMAIL_PAT.search(text))
+
+    # 1) 强联系方式 / 通联信息过滤
+    if contact_hits >= 2:
+        return True
+    if text.startswith(('联系人', '联系电话', '电话：', '邮寄地址', '地址：', '通信地址')):
+        return True
+    if has_phone and has_email:
+        return True
+    if (has_phone or has_email) and contact_hits >= 1:
+        return True
+    # QQ / 微信 + 明显数字 => 多半是联系方式
+    if ('QQ' in text or '微信' in text) and digit_ratio > 0.2:
+        return True
+
+    # 2) 地址型噪声：地址关键词密集 + 数字占比适中
+    addr_kw_count = sum(1 for k in ADDRESS_KEYWORDS if k in text)
+    if addr_kw_count >= 3 and digit_ratio > 0.15:
+        return True
+
+    # 3) 高度数字化（表格编号、代码片段等）
+    if digit_ratio > 0.45:
+        return True
+
+    # 4) 有效汉字过少 / 汉字比例过低
+    if chinese_chars < 6: # 绝对数量检查
+        return True
+    if chinese_chars / total_len < 0.5: # 密度检查
+        return True
+
+    return False
+
+
+def clean_and_filter_sentence(text: str) -> Optional[str]:
+    """
+    统一对外接口：
+      - 返回规范化后的句子字符串：可用于 clean 文件 / 训练
+      - 返回 None：认为是垃圾样本，丢弃
+    """
+    # 1. 规范化 (去皮)
+    t = normalize_sentence(text)
+    if not t:
+        return None
+
+    # 2. 长度过滤 (去尾)
+    # 设定为 10，保留 "加强公共法律服务建设。" 但丢弃 "鼓励探索创新。"
+    if not (10 <= len(t) <= 250):
+        return None
+        
+    # 3. 噪声规则过滤 (去核)
+    if should_filter_sentence_core(t):
+        return None
+
+    return t
+
+# ==========================================
+# 工具模块结束
+# ==========================================
 
 
 def _yield_json_documents(file_path: Path) -> Iterable[Dict]:
@@ -42,31 +218,21 @@ def _yield_json_documents(file_path: Path) -> Iterable[Dict]:
                     doc = json.loads(line)
                     if isinstance(doc, dict):
                         yield doc
-                    else:
-                        logger.warning(f"Skipping non-dict entry in {file_path} line {line_no}")
-                except json.JSONDecodeError as exc:
-                    logger.warning(f"JSON decode error in {file_path} line {line_no}: {exc}")
+                except json.JSONDecodeError:
+                    pass
         return
 
-    # Default handler assumes standard JSON structure
+    # Handle standard JSON
     with open(file_path, 'r', encoding='utf-8') as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:
-            # Fallback: treat as JSONL content despite extension name
             f.seek(0)
-            for line_no, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    doc = json.loads(line)
-                    if isinstance(doc, dict):
-                        yield doc
-                    else:
-                        logger.warning(f"Skipping non-dict entry in {file_path} line {line_no}")
-                except json.JSONDecodeError as exc:
-                    logger.warning(f"JSON decode error in {file_path} line {line_no}: {exc}")
+            for line in f:
+                if line.strip():
+                    try:
+                        yield json.loads(line)
+                    except: pass
             return
 
     def _emit_from_container(container):
@@ -89,50 +255,25 @@ def _yield_json_documents(file_path: Path) -> Iterable[Dict]:
 
 
 def clean_html_tags(text: str) -> str:
-    """
-    清理HTML标签和特殊字符
-    
-    Args:
-        text: 原始文本
-    
-    Returns:
-        清理后的文本
-    """
-    # 将块级标签转换为空格（避免内容粘连）
+    """清理HTML标签和特殊字符"""
     block_tags = r'</?(p|div|br|h[1-6]|li|ul|ol|table|tr|td|th)[^>]*>'
     text = re.sub(block_tags, ' ', text, flags=re.IGNORECASE)
-    
-    # 删除其他HTML标签
     text = re.sub(r'<[^>]+>', '', text)
-    
-    # 将HTML实体转换为空格 (如&nbsp;, &lt;等)
     text = re.sub(r'&[a-zA-Z]+;', ' ', text)
     text = re.sub(r'&#\d+;', ' ', text)
-    
-    # 删除零宽字符和其他不可见Unicode控制字符
-    # U+200B: 零宽空格, U+200C: 零宽非连接符, U+200D: 零宽连接符
-    # U+FEFF: 零宽非断空格(BOM), U+00AD: 软连字符
     zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
     for char in zero_width_chars:
         text = text.replace(char, '')
-    
-    # 删除多余空白字符
-    text = re.sub(r'\s+', ' ', text)
-    text = text.strip()
-    
     return text
 
 
 def clean_raw_data(raw_dir: Path, output_path: Path):
     """
     清洗原始公文数据
-    
-    输入：data/raw/ 目录下的jsonl文件
-    输出：data/clean/ 目录下每行一个正确句子的txt文件
     """
     logger.info(f"Cleaning raw data from {raw_dir}")
     
-    clean_sentences = []
+    clean_sentences = set() # 使用set自动去重
     
     data_files = sorted(raw_dir.glob("*.jsonl")) + sorted(raw_dir.glob("*.json"))
     if not data_files:
@@ -140,173 +281,97 @@ def clean_raw_data(raw_dir: Path, output_path: Path):
         return []
 
     for data_file in data_files:
+        # logger.info(f"Processing file: {data_file.name}") # 减少日志输出
         for doc in _yield_json_documents(data_file):
             try:
                 content = doc.get('contentText', '')
-
                 if not content:
                     continue
 
-                content = clean_html_tags(content)
-
-                if not content:
-                    continue
-
+                # 基础切分 (按标点粗分)
                 sentences = content.replace('。', '。\n').replace('！', '！\n').replace('？', '？\n').split('\n')
 
                 for sent in sentences:
-                    sent = sent.strip()
-                    if 20 <= len(sent) <= 200:
-                        clean_sentences.append(sent)
+                    # === 核心调用：清洗与过滤 ===
+                    processed = clean_and_filter_sentence(sent)
+                    if processed is not None:
+                        clean_sentences.add(processed)
+                    
             except Exception as e:
-                logger.warning(f"Error processing document in {data_file}: {e}")
                 continue
     
-    # 去重
-    clean_sentences = list(set(clean_sentences))
+    # 转回列表并排序
+    final_sentences = sorted(list(clean_sentences))
     
-    # 保存
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
-        for sent in clean_sentences:
+        for sent in final_sentences:
             f.write(sent + '\n')
     
-    logger.info(f"Cleaned {len(clean_sentences)} sentences, saved to {output_path}")
-    return clean_sentences
+    logger.info(f"Cleaned {len(final_sentences)} sentences, saved to {output_path}")
+    return final_sentences
 
 
-def align_tokens_with_difflib(
-    source_tokens: List[str],
-    target_tokens: List[str],
-    target_svo_labels: List[str]  # 新增：传入 Target 的 SVO 标签
-) -> Tuple[List[str], List[str]]:
-    """
-    使用difflib对齐，生成 GEC 标签，并将 Target 的 SVO 标签投射到 Source 上。
-    这是实现“认知冲突”的关键步骤。
-    
-    Returns:
-        gec_labels: Source 的编辑标签
-        source_svo_labels: Source 的句法标签（来自 Target 的投影）
-    """
-    matcher = difflib.SequenceMatcher(None, source_tokens, target_tokens,autojunk=False)
-    
+def align_tokens_with_difflib(source_tokens: List[str], target_tokens: List[str], target_svo_labels: List[str]) -> Tuple[List[str], List[str]]:
+    """使用difflib对齐，生成 GEC 标签，并将 Target 的 SVO 标签投射到 Source 上"""
+    matcher = difflib.SequenceMatcher(None, source_tokens, target_tokens, autojunk=False)
     gec_labels = []
     source_svo_labels = []
     
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        # source[i1:i2] vs target[j1:j2]
-        
         if tag == 'equal':
-            # === 情况1: 完全匹配 ===
-            # GEC: KEEP
-            # SVO: 直接继承 Target 对应位置的标签
             for k in range(i2 - i1):
                 gec_labels.append(cfg.GEC_KEEP_LABEL)
                 source_svo_labels.append(target_svo_labels[j1 + k])
-        
         elif tag == 'replace':
-            # === 情况2: 错别字/词混淆 ===
-            # Source: "权力" (i1:i2) -> Target: "权利" (j1:j2) (假设 target_svo 为 OBJ)
-            # GEC: REPLACE
-            # SVO: 即使字错了，句法成分依然存在，应该继承 Target 的标签！
-            
             src_len = i2 - i1
             tgt_len = j2 - j1
-            
             for k in range(src_len):
-                # 1. 生成 GEC 标签 (REPLACE)
                 if k < tgt_len:
-                    # 还有对应的 Target 字符
                     replace_char = target_tokens[j1 + k]
-                    # 如果是 Source 的最后一个字，且 Target 还有剩余，把剩余的拼进来
                     if k == src_len - 1 and src_len < tgt_len:
                         remaining = "".join(target_tokens[j1 + k + 1 : j2])
                         full_replacement = replace_char + remaining
-                        # **标签压缩策略**：如果启用了压缩且不在高频词表中，使用 MASK
                         if cfg.ENABLE_LABEL_COMPRESSION and full_replacement not in cfg.HIGH_FREQ_FUNCTION_WORDS:
                             gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}MASK")
                         else:
                             gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{full_replacement}")
                     else:
-                        # **标签压缩策略**
                         if cfg.ENABLE_LABEL_COMPRESSION and replace_char not in cfg.HIGH_FREQ_FUNCTION_WORDS:
                             gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}MASK")
                         else:
                             gec_labels.append(f"{cfg.GEC_REPLACE_PREFIX}{replace_char}")
-                    
-                    # 2. 生成 SVO 标签 (继承 Target)
-                    # 逻辑：错字也是句子骨架的一部分
                     source_svo_labels.append(target_svo_labels[j1 + k])
-                    
                 else:
-                    # Source 比 Target 长，多出来的部分标记为 DELETE
                     gec_labels.append(cfg.GEC_DELETE_LABEL)
-                    # 多出来的错字没有对应的 Target SVO，标记为 O
                     source_svo_labels.append('O')
-
         elif tag == 'delete':
-            # === 情况3: 成分赘余 (Source 多了) ===
-            # 例子: Source="通过会议" -> Target="会议" (SUB)
-            # "通过" 是 delete。
-            # GEC: DELETE
-            # SVO: 多出来的介词/废话，肯定不是骨架，标记为 O
             for k in range(i2 - i1):
                 gec_labels.append(cfg.GEC_DELETE_LABEL)
                 source_svo_labels.append('O')
-        
         elif tag == 'insert':
-            # === 情况4: 成分缺失 (Source 少了) ===
-            # 例子: Source="学习" -> Target="我们学习"
-            # "我们" 是 insert。
-            # GEC: 前一个 token 标记 APPEND
-            # SVO: Source 里根本没有这个字，所以没法给它贴 SVO 标签。
-            #      这就导致 Source 序列里缺失了 B-SUB。
-            #      这是符合预期的：SVO Head 看到开头是 PRED，GEC Head 看到 APPEND。
-            
             insert_content = "".join(target_tokens[j1:j2])
-            
-            # 处理 GEC 的 APPEND 逻辑
             if i1 > 0 and len(gec_labels) > 0:
-                # 尝试挂载到前一个 token
                 last_label = gec_labels[-1]
                 if last_label == cfg.GEC_KEEP_LABEL:
-                    # **标签压缩策略**：只为高频词生成专门的 APPEND 标签
                     if cfg.ENABLE_LABEL_COMPRESSION and insert_content not in cfg.HIGH_FREQ_FUNCTION_WORDS:
-                        # 对于非高频词，统一使用 APPEND_MASK
                         gec_labels[-1] = f"{cfg.GEC_APPEND_PREFIX}MASK"
                     else:
                         gec_labels[-1] = f"{cfg.GEC_APPEND_PREFIX}{insert_content}"
-                # 如果前一个是 Replace/Delete，简化处理忽略 Append，或者不做处理
-            else:
-                # 句首 Insert，受限于 GECToR 机制可能丢失，暂忽略
-                pass
-            
-            # SVO: 没有任何 Source Token 产生，所以不需要 append 任何 SVO label
             pass
 
     return gec_labels, source_svo_labels
 
 
-
 def build_gec_label_vocab(samples: List[Dict], output_path: Path):
-    """
-    构建GEC标签词表
-    
-    收集所有出现过的GEC标签
-    
-    **重要**：强制将 $KEEP 放在第 0 位，确保其 ID 为 0
-    这对于 FocalLoss 和评估指标的正确性至关重要
-    """
+    """构建GEC标签词表"""
     label_set = set()
     label_set.add(cfg.GEC_KEEP_LABEL)
     label_set.add(cfg.GEC_DELETE_LABEL)
-    
     for sample in samples:
         for label in sample['gec_labels']:
             label_set.add(label)
     
-    # **关键修改**：确保 $KEEP 在第一位，其余按字母顺序排列
-    # 先移除 $KEEP，排序其他标签，然后将 $KEEP 放在开头
     label_set.discard(cfg.GEC_KEEP_LABEL)
     labels = [cfg.GEC_KEEP_LABEL] + sorted(list(label_set))
     
@@ -314,126 +379,66 @@ def build_gec_label_vocab(samples: List[Dict], output_path: Path):
     with open(output_path, 'w', encoding='utf-8') as f:
         for label in labels:
             f.write(label + '\n')
-    
-    logger.info(f"Built GEC label vocab with {len(labels)} labels, saved to {output_path}")
-    logger.info(f"$KEEP label is at index 0: {labels[0] == cfg.GEC_KEEP_LABEL}")
+    logger.info(f"Built GEC label vocab with {len(labels)} labels")
 
 
 def build_svo_label_vocab(output_path: Path):
-    """
-    构建SVO标签词表（固定的7个标签）
-    """
+    """构建SVO标签词表"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w', encoding='utf-8') as f:
         for label in cfg.SVO_LABELS:
             f.write(label + '\n')
-    
-    logger.info(f"Built SVO label vocab, saved to {output_path}")
 
 
-def generate_training_data(
-    clean_sentences: List[str],
-    output_dir: Path,
-    train_ratio: float = 0.9,
-    num_samples_per_sentence: int = 2,
-    use_cuda: bool = False
-):
-    """
-    生成训练数据
-    
-    步骤：
-    1. 为每个正确句子生成错误样本
-    2. 生成SVO标签
-    3. 生成GECToR标签
-    4. 划分训练集和验证集
-    
-    Args:
-        clean_sentences: 清洗后的正确句子列表
-        output_dir: 输出目录
-        train_ratio: 训练集比例
-        num_samples_per_sentence: 每个句子生成的错误样本数
-        use_cuda: 是否使用GPU加速DDParser（默认False，使用CPU）
-    """
+def generate_training_data(clean_sentences: List[str], output_dir: Path, train_ratio: float = 0.9, num_samples_per_sentence: int = 2, use_cuda: bool = False):
+    """生成训练数据"""
     error_gen = ErrorGenerator()
     svo_extractor = SVOExtractor(use_cuda=use_cuda)
-    
     all_samples = []
     
-    # 生成错误样本
     for sent_id, correct_sent in enumerate(tqdm(clean_sentences, desc="Generating samples")):
-        # 预处理: 去除可能导致LTP解析问题的不可见字符
-        # LTP在分词时会自动过滤零宽字符,导致token拼接后与原句不一致
+        # === 兜底清洗 (Double Check) ===
+        # 即使从文件中读取，也再过一遍过滤器，防止旧数据污染
+        correct_sent = clean_and_filter_sentence(correct_sent)
+        if not correct_sent:
+            continue
+            
+        # 去除零宽字符
         zero_width_chars = '\u200b\u200c\u200d\ufeff\u00ad'
         for char in zero_width_chars:
             correct_sent = correct_sent.replace(char, '')
-        correct_sent = correct_sent.strip()
-        
-        # 跳过空句子或过短的句子
-        if len(correct_sent) < 10:
-            continue
         
         try:
-            # 1. 获取 Target (正确句) 的 Token 和 SVO 骨架
+            # 1. 获取 Target (正确句)
             target_tokens, target_svo_labels = svo_extractor.extract(correct_sent)
             
-            # 先加一条"无错句"样本（句级负样本）
-            assert ''.join(target_tokens) == correct_sent, (
-                f"Token拼接失败 (sent_id={sent_id}):\n"
-                f"  原句长度: {len(correct_sent)}\n"
-                f"  原句: {correct_sent[:100]}...\n"
-                f"  Token数: {len(target_tokens)}\n"
-                f"  拼接长度: {len(''.join(target_tokens))}\n"
-                f"  拼接结果: {''.join(target_tokens)[:100]}..."
-            )
-            assert len(target_svo_labels) == len(correct_sent), (
-                f"SVO标签长度不匹配 (sent_id={sent_id}): "
-                f"labels={len(target_svo_labels)}, sent={len(correct_sent)}"
-            )
-        except AssertionError as e:
-            logger.error(f"句子 {sent_id} 处理失败: {e}")
-            continue
-        except Exception as e:
-            logger.error(f"句子 {sent_id} 发生异常: {e}")
-            continue
-        
-        clean_sample = {
-            'uid': f'sent_{sent_id}_clean',
-            'text': correct_sent,
-            'tokens': list(correct_sent),
-            'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
-            'svo_labels': target_svo_labels,
-            'sent_has_error': 0
-        }
-        all_samples.append(clean_sample)
-        
-        for sample_id in range(num_samples_per_sentence):
-            try:
-                # 2. 生成 Source (错句)
+            if ''.join(target_tokens) != correct_sent:
+                continue
+
+            # 加入正确样本
+            clean_sample = {
+                'uid': f'sent_{sent_id}_clean',
+                'text': correct_sent,
+                'tokens': list(correct_sent),
+                'gec_labels': [cfg.GEC_KEEP_LABEL] * len(correct_sent),
+                'svo_labels': target_svo_labels,
+                'sent_has_error': 0
+            }
+            all_samples.append(clean_sample)
+            
+            # 2. 生成错误样本
+            for sample_id in range(num_samples_per_sentence):
                 error_sent, errors = error_gen.generate_errors(correct_sent, max_errors=2)
                 
                 if not errors or error_sent == correct_sent:
                     continue
                 
                 source_tokens = list(error_sent)
+                gec_labels, source_svo_labels = align_tokens_with_difflib(source_tokens, target_tokens, target_svo_labels)
                 
-                # 3. 对齐并投射标签
-                # 关键点：直接把 target_svo_labels 传进去进行投射
-                gec_labels, source_svo_labels = align_tokens_with_difflib(
-                    source_tokens, 
-                    target_tokens, 
-                    target_svo_labels
-                )
-                
-                # 4. 长度对齐检查 (Double Check)
-                assert len(gec_labels) == len(source_tokens), (
-                    f"GEC label len mismatch (sent_id={sent_id}, sample_id={sample_id}): "
-                    f"{len(gec_labels)} vs {len(source_tokens)}"
-                )
-                assert len(source_svo_labels) == len(source_tokens), (
-                    f"SVO label len mismatch (sent_id={sent_id}, sample_id={sample_id}): "
-                    f"{len(source_svo_labels)} vs {len(source_tokens)}"
-                )
-                
+                if len(gec_labels) != len(source_tokens):
+                    continue
+
                 sample = {
                     'uid': f'sent_{sent_id}_sample_{sample_id}',
                     'text': error_sent,
@@ -442,104 +447,64 @@ def generate_training_data(
                     'svo_labels': source_svo_labels,
                     'sent_has_error': 1
                 }
-                
                 all_samples.append(sample)
             
-            except Exception as e:
-                logger.warning(f"生成错误样本失败 (sent_id={sent_id}, sample_id={sample_id}): {e}")
-                continue
+        except Exception as e:
+            continue
     
-    logger.info(f"Generated {len(all_samples)} samples")
-    
-    # 打乱并划分
+    # 划分与保存
     random.shuffle(all_samples)
     split_idx = int(len(all_samples) * train_ratio)
     train_samples = all_samples[:split_idx]
     dev_samples = all_samples[split_idx:]
     
-    # 保存
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    train_path = output_dir / 'train.json'
-    dev_path = output_dir / 'dev.json'
-    
-    with open(train_path, 'w', encoding='utf-8') as f:
+    with open(output_dir / 'train.json', 'w', encoding='utf-8') as f:
         json.dump(train_samples, f, ensure_ascii=False, indent=2)
-    
-    with open(dev_path, 'w', encoding='utf-8') as f:
+    with open(output_dir / 'dev.json', 'w', encoding='utf-8') as f:
         json.dump(dev_samples, f, ensure_ascii=False, indent=2)
     
-    logger.info(f"Train: {len(train_samples)} samples -> {train_path}")
-    logger.info(f"Dev: {len(dev_samples)} samples -> {dev_path}")
-    
-    # 构建标签词表
     build_gec_label_vocab(all_samples, cfg.VOCAB_DIR / 'label_map.txt')
     build_svo_label_vocab(cfg.VOCAB_DIR / 'svo_labels.txt')
+    
+    logger.info(f"Generated {len(all_samples)} samples (Train: {len(train_samples)}, Dev: {len(dev_samples)})")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Data Preprocessing")
-    parser.add_argument('--raw_dir', type=str, default=str(cfg.RAW_DATA_DIR), 
-                       help="Raw data directory")
-    parser.add_argument('--output_dir', type=str, default=str(cfg.SYNTHETIC_DATA_DIR),
-                       help="Output directory for training data")
-    parser.add_argument('--num_samples', type=int, default=2,
-                       help="Number of error samples per sentence")
-    parser.add_argument('--use_cuda', action='store_true', default=False,
-                       help="Use GPU for SVO extraction (requires CUDA)")
-    parser.add_argument('--max_sentences', type=int, default=None,
-                       help="Maximum number of sentences to process (default: None, process all)")
+    parser.add_argument('--raw_dir', type=str, default=str(cfg.RAW_DATA_DIR), help="Raw data directory")
+    parser.add_argument('--output_dir', type=str, default=str(cfg.SYNTHETIC_DATA_DIR), help="Output directory")
+    parser.add_argument('--num_samples', type=int, default=2, help="Samples per sentence")
+    parser.add_argument('--use_cuda', action='store_true', default=False, help="Use GPU")
+    parser.add_argument('--max_sentences', type=int, default=None, help="Max sentences")
     
     args = parser.parse_args()
     
-    # 检测GPU可用性
+    # GPU check
+    use_cuda = args.use_cuda
     try:
         import torch
-        if args.use_cuda and torch.cuda.is_available():
-            use_cuda = True
-            logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
-        elif args.use_cuda and not torch.cuda.is_available():
+        if use_cuda and not torch.cuda.is_available():
+            logger.warning("CUDA not available, using CPU")
             use_cuda = False
-            logger.warning("CUDA requested but not available, falling back to CPU")
-        else:
-            use_cuda = False
-            logger.info("Using CPU for SVO extraction")
     except ImportError:
         use_cuda = False
-        logger.warning("PyTorch not found, using CPU")
-    
-    # 1. 清洗数据 
+
+    # 1. Clean Data
     clean_path = cfg.CLEAN_DATA_DIR / 'clean_sentences.txt'
-    needs_refresh = (not clean_path.exists()) or clean_path.stat().st_size == 0
-    if needs_refresh:
-        clean_sentences = clean_raw_data(Path(args.raw_dir), clean_path)
-    else:
-        logger.info(f"Loading clean data from {clean_path}")
-        with open(clean_path, 'r', encoding='utf-8') as f:
-            clean_sentences = [line.strip() for line in f if line.strip()]
-        if not clean_sentences:
-            logger.info("Existing clean data file is empty, regenerating from raw data")
-            clean_sentences = clean_raw_data(Path(args.raw_dir), clean_path)
+    # 总是重新清洗，确保使用最新规则
+    clean_sentences = clean_raw_data(Path(args.raw_dir), clean_path)
     
-    logger.info(f"Loaded {len(clean_sentences)} clean sentences")
-    
-    # 2. 生成训练数据
-    if args.max_sentences is None:
-        num_to_process = len(clean_sentences)
-        logger.info(f"Processing all {num_to_process} sentences with GPU={'enabled' if use_cuda else 'disabled'}")
-    else:
-        num_to_process = min(len(clean_sentences), args.max_sentences)
-        logger.info(f"Processing {num_to_process} / {len(clean_sentences)} sentences with GPU={'enabled' if use_cuda else 'disabled'}")
-    
+    # 2. Generate Data
+    if args.max_sentences:
+        clean_sentences = clean_sentences[:args.max_sentences]
+        
     generate_training_data(
-        clean_sentences[:num_to_process],
+        clean_sentences,
         output_dir=Path(args.output_dir),
         num_samples_per_sentence=args.num_samples,
-        use_cuda=use_cuda  # 使用命令行参数控制
+        use_cuda=use_cuda
     )
-    
-    logger.info("Data preprocessing completed!")
-
 
 if __name__ == "__main__":
     main()
