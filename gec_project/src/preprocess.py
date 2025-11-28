@@ -349,7 +349,7 @@ def align_tokens_with_difflib(source_tokens: List[str], target_tokens: List[str]
             for k in range(i2 - i1):
                 gec_labels.append(cfg.GEC_DELETE_LABEL)
                 source_svo_labels.append('O')
-        elif tag == 'insert':
+        elif tag == 'insert': # 公文极少情况下会在开头就缺词
             insert_content = "".join(target_tokens[j1:j2])
             if i1 > 0 and len(gec_labels) > 0:
                 last_label = gec_labels[-1]

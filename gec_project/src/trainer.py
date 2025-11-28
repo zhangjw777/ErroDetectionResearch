@@ -227,6 +227,9 @@ class GECTrainer:
         # 仅主进程创建实验目录和TensorBoard
         if is_main_process():
             self.exp_dir.mkdir(parents=True, exist_ok=True)
+            # 创建 F2 最优模型的单独保存目录
+            self.f2_best_dir = self.exp_dir / "best_f2_model"
+            self.f2_best_dir.mkdir(parents=True, exist_ok=True)
             
             # TensorBoard (可选)
             try:
@@ -236,6 +239,7 @@ class GECTrainer:
                 self.writer = None
                 logger.warning("TensorBoard not available")
         else:
+            self.f2_best_dir = None
             self.writer = None
         
         if is_main_process():
@@ -557,13 +561,19 @@ class GECTrainer:
             # 保存最佳模型 (基于Recall，仅主进程)
             if eval_metrics['recall'] > self.best_recall:
                 self.best_recall = eval_metrics['recall']
-                self.best_f2 = eval_metrics['f2']
                 if is_main_process():
                     self.save_checkpoint('best_model.pt', eval_metrics)
-                    logger.info(f"✓ New best model saved! Recall: {self.best_recall:.4f}")
+                    logger.info(f"✓ New best Recall model saved! Recall: {self.best_recall:.4f}")
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1
+            
+            # 保存最佳 F2 模型 (基于F2 Score，仅主进程)
+            if eval_metrics['f2'] > self.best_f2:
+                self.best_f2 = eval_metrics['f2']
+                if is_main_process():
+                    self.save_checkpoint('best_f2_model.pt', eval_metrics, save_dir=self.f2_best_dir)
+                    logger.info(f"✓ New best F2 model saved! F2: {self.best_f2:.4f}")
             
             # Early Stopping
             if self.patience_counter >= cfg.PATIENCE:
@@ -580,11 +590,20 @@ class GECTrainer:
                 dist.barrier()
         
         if is_main_process():
-            logger.info(f"Training completed! Best Recall: {self.best_recall:.4f}")
+            logger.info(f"Training completed! Best Recall: {self.best_recall:.4f}, Best F2: {self.best_f2:.4f}")
     
-    def save_checkpoint(self, filename: str, metrics: Dict = None):
-        """保存checkpoint（自动处理DDP包装的模型）"""
-        checkpoint_path = self.exp_dir / filename
+    def save_checkpoint(self, filename: str, metrics: Dict = None, save_dir: Path = None):
+        """
+        保存checkpoint（自动处理DDP包装的模型）
+        
+        Args:
+            filename: checkpoint文件名
+            metrics: 评估指标
+            save_dir: 保存目录，默认为self.exp_dir
+        """
+        if save_dir is None:
+            save_dir = self.exp_dir
+        checkpoint_path = save_dir / filename
         
         # 获取原始模型（处理DDP包装）
         model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
@@ -597,6 +616,7 @@ class GECTrainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),  # 保存AMP状态
             'best_recall': self.best_recall,
+            'best_f2': self.best_f2,  # 同时保存F2最优值
             'config': self.config,
         }
         

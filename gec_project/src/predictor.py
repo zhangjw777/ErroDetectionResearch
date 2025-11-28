@@ -71,6 +71,9 @@ class GECPredictor:
             svo_labels = [line.strip() for line in f]
         svo_label_map = {label: idx for idx, label in enumerate(svo_labels)}
         
+        # 创建反向映射
+        self.id2svo_label = {v: k for k, v in svo_label_map.items()}
+        
         return gec_label_map, svo_label_map
     
     def _load_model(self, model_path: str) -> GECModelWithMTL:
@@ -93,17 +96,20 @@ class GECPredictor:
         model.load_state_dict(checkpoint['model_state_dict'])
         
         logger.info(f"Model loaded from {model_path}")
-        logger.info(f"Best Recall: {checkpoint.get('best_recall', 'N/A')}")
+        logger.info(f"Checkpoint Info - Epoch: {checkpoint.get('epoch', 'N/A')}, "
+                   f"Best Recall: {checkpoint.get('best_recall', 'N/A')}, "
+                   f"Best F2: {checkpoint.get('best_f2', 'N/A')}")
         
         return model
     
     @torch.no_grad()
-    def predict(self, text: str) -> Dict:
+    def predict(self, text: str, return_svo: bool = False) -> Dict:
         """
         对单个文本进行预测
         
         Args:
             text: 输入文本
+            return_svo: 是否返回SVO句法分析结果（BIO标签）
         
         Returns:
             {
@@ -113,7 +119,9 @@ class GECPredictor:
                 'labels': 编辑标签列表,
                 'edits': 编辑操作详情,
                 'sent_has_error': 句子是否有错 (bool),
-                'sent_error_prob': 句子有错的概率 (float)
+                'sent_error_prob': 句子有错的概率 (float),
+                'svo_labels': SVO标签列表 (仅当return_svo=True时),
+                'svo_analysis': SVO分析结果 (仅当return_svo=True时)
             }
         """
         # Tokenize
@@ -144,19 +152,27 @@ class GECPredictor:
         # 句级错误检测预测
         sent_probs = F.softmax(sent_logits, dim=-1).squeeze(0)  # [2]
         sent_error_prob = sent_probs[1].item()  # 预测"有错"的概率
-        sent_has_error = sent_error_prob > 0.5  # 二分类阈值
+        sent_has_error = sent_error_prob > 0.4  # 二分类阈值
         
         # 获取预测标签
         gec_preds = torch.argmax(gec_logits, dim=-1).squeeze(0).cpu().tolist()
+        svo_preds = torch.argmax(svo_logits, dim=-1).squeeze(0).cpu().tolist()
         
         # 提取原始token的标签（只取第一个子词的预测）
         token_labels = []
+        svo_labels = []
         edits = []
         
         for i, pos in enumerate(token_to_ids):
+            # GEC标签
             label_id = gec_preds[pos]
             label_str = self.id2gec_label[label_id]
             token_labels.append(label_str)
+            
+            # SVO标签 (BIO格式)
+            svo_id = svo_preds[pos]
+            svo_str = self.id2svo_label[svo_id]
+            svo_labels.append(svo_str)
             
             if label_str != cfg.GEC_KEEP_LABEL:
                 edits.append({
@@ -168,7 +184,7 @@ class GECPredictor:
         # 应用编辑操作
         corrected_text = self._apply_edits(tokens, token_labels)
         
-        return {
+        result = {
             'original': text,
             'corrected': corrected_text,
             'tokens': tokens,
@@ -177,6 +193,75 @@ class GECPredictor:
             'sent_has_error': sent_has_error,  # 句子是否有错（bool）
             'sent_error_prob': sent_error_prob  # 句子有错的概率（float）
         }
+        
+        # 可选：返回SVO分析结果
+        if return_svo:
+            result['svo_labels'] = svo_labels
+            result['svo_analysis'] = self._extract_svo_spans(tokens, svo_labels)
+        
+        return result
+    
+    def _extract_svo_spans(self, tokens: List[str], svo_labels: List[str]) -> Dict:
+        """
+        从BIO标签中提取主谓宾成分的文本片段
+        
+        Args:
+            tokens: 字符列表
+            svo_labels: BIO格式的SVO标签列表
+        
+        Returns:
+            {
+                'subjects': ['主语1', '主语2', ...],
+                'predicates': ['谓语1', '谓语2', ...],
+                'objects': ['宾语1', '宾语2', ...]
+            }
+        """
+        spans = {'subjects': [], 'predicates': [], 'objects': []}
+        current_type = None
+        current_span = []
+        
+        for token, label in zip(tokens, svo_labels):
+            if label.startswith('B-'):
+                # 保存前一个span
+                if current_span and current_type:
+                    span_text = ''.join(current_span)
+                    if current_type == 'SUB':
+                        spans['subjects'].append(span_text)
+                    elif current_type == 'PRED':
+                        spans['predicates'].append(span_text)
+                    elif current_type == 'OBJ':
+                        spans['objects'].append(span_text)
+                
+                # 开始新span
+                current_type = label.split('-')[1]
+                current_span = [token]
+            elif label.startswith('I-') and current_type == label.split('-')[1]:
+                # 继续当前span
+                current_span.append(token)
+            else:
+                # O标签，结束当前span
+                if current_span and current_type:
+                    span_text = ''.join(current_span)
+                    if current_type == 'SUB':
+                        spans['subjects'].append(span_text)
+                    elif current_type == 'PRED':
+                        spans['predicates'].append(span_text)
+                    elif current_type == 'OBJ':
+                        spans['objects'].append(span_text)
+                current_type = None
+                current_span = []
+        
+        # 处理最后一个span
+        if current_span and current_type:
+            span_text = ''.join(current_span)
+            if current_type == 'SUB':
+                spans['subjects'].append(span_text)
+            elif current_type == 'PRED':
+                spans['predicates'].append(span_text)
+            elif current_type == 'OBJ':
+                spans['objects'].append(span_text)
+        
+        return spans
     
     def _apply_edits(self, tokens: List[str], labels: List[str]) -> str:
         """
@@ -201,7 +286,7 @@ class GECPredictor:
                 # 添加
                 result_tokens.append(token)
                 append_char = label.replace(cfg.GEC_APPEND_PREFIX, '')
-                if append_char and append_char != 'MASK':
+                if append_char:
                     result_tokens.append(append_char)
             elif label.startswith(cfg.GEC_REPLACE_PREFIX):
                 # 替换
@@ -246,7 +331,7 @@ def main():
     ]
     
     for text in test_texts:
-        result = predictor.predict(text)
+        result = predictor.predict(text, return_svo=True)
         print(f"\n原文: {result['original']}")
         print(f"纠正: {result['corrected']}")
         print(f"句级判断: {'[有错]' if result['sent_has_error'] else '[无错]'} (概率: {result['sent_error_prob']:.3f})")
@@ -254,6 +339,14 @@ def main():
             print(f"编辑: {result['edits']}")
         else:
             print("编辑: 无需修改")
+        
+        # 显示SVO分析结果
+        if 'svo_analysis' in result:
+            svo = result['svo_analysis']
+            print(f"句法分析:")
+            print(f"  - 主语: {svo['subjects'] if svo['subjects'] else '未识别到'}")
+            print(f"  - 谓语: {svo['predicates'] if svo['predicates'] else '未识别到'}")
+            print(f"  - 宾语: {svo['objects'] if svo['objects'] else '未识别到'}")
 
 
 if __name__ == "__main__":
