@@ -74,7 +74,7 @@ ENABLE_LABEL_COMPRESSION = True  # 是否启用标签压缩（建议在标签词
 
 # ==================== 训练配置 ====================
 # 基础训练参数
-BATCH_SIZE = 128
+BATCH_SIZE = 128 #双4090配置
 NUM_EPOCHS = 8
 LEARNING_RATE = 2e-5
 WARMUP_RATIO = 0.1

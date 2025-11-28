@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -208,7 +208,7 @@ class GECTrainer:
         
         # AMP设置
         self.use_amp = use_amp and torch.cuda.is_available()
-        self.scaler = GradScaler(enabled=self.use_amp)
+        self.scaler = GradScaler('cuda', enabled=self.use_amp)
         
         # DDP设置
         self.use_ddp = use_ddp
@@ -273,7 +273,7 @@ class GECTrainer:
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播 (使用AMP)
-            with autocast(enabled=self.use_amp):
+            with autocast(device_type='cuda', enabled=self.use_amp):
                 gec_logits, svo_logits, sent_logits = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -386,7 +386,7 @@ class GECTrainer:
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播 (使用AMP)
-            with autocast(enabled=self.use_amp):
+            with autocast(device_type='cuda', enabled=self.use_amp):
                 gec_logits, svo_logits, sent_logits = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask

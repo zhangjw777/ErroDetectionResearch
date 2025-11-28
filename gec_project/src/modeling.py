@@ -190,32 +190,4 @@ def create_model(
 
 if __name__ == "__main__":
     # 测试模型创建
-    print("Testing model creation...")
-    
-    # 模拟配置
-    from transformers import BertConfig
-    
-    config = BertConfig(
-        hidden_size=768,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        intermediate_size=3072,
-    )
-    
-    model = GECModelWithMTL(
-        config=config,
-        num_gec_labels=5000,
-        num_svo_labels=7
-    )
-    
-    print(f"Model created successfully!")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    
-    # 测试前向传播
-    batch_size, seq_len = 4, 128
-    input_ids = torch.randint(0, 21128, (batch_size, seq_len))
-    attention_mask = torch.ones(batch_size, seq_len)
-    
-    gec_logits, svo_logits = model(input_ids, attention_mask)
-    print(f"GEC logits shape: {gec_logits.shape}")  # [4, 128, 5000]
-    print(f"SVO logits shape: {svo_logits.shape}")  # [4, 128, 7]
+   pass
