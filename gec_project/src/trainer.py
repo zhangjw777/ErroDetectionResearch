@@ -385,14 +385,27 @@ class GECTrainer:
                 self.writer.add_scalar('train/svo_loss', svo_loss, self.global_step)
                 self.writer.add_scalar('train/sent_loss', sent_loss, self.global_step)
                 
-                # 记录不确定性参数
+                # 记录不确定性参数 (详细记录)
                 if self.use_uncertainty_weighting and 'log_var_gec' in loss_dict:
+                    # 对数方差 s = log(σ²)
                     self.writer.add_scalar('uncertainty/log_var_gec', loss_dict['log_var_gec'], self.global_step)
                     self.writer.add_scalar('uncertainty/log_var_svo', loss_dict['log_var_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/log_var_sent', loss_dict['log_var_sent'], self.global_step)
+                    
+                    # 任务权重 = exp(-s) = 1/σ²
                     self.writer.add_scalar('uncertainty/weight_gec', loss_dict['weight_gec'], self.global_step)
                     self.writer.add_scalar('uncertainty/weight_svo', loss_dict['weight_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/weight_sent', loss_dict['weight_sent'], self.global_step)
+                    
+                    # 标准差 σ = exp(s/2)
+                    self.writer.add_scalar('uncertainty/sigma_gec', loss_dict['sigma_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/sigma_svo', loss_dict['sigma_svo'], self.global_step)
+                    self.writer.add_scalar('uncertainty/sigma_sent', loss_dict['sigma_sent'], self.global_step)
+                    
+                    # 加权后的损失
+                    self.writer.add_scalar('uncertainty/weighted_gec', loss_dict['weighted_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/weighted_svo', loss_dict['weighted_svo'], self.global_step)
+                    self.writer.add_scalar('uncertainty/weighted_sent', loss_dict['weighted_sent'], self.global_step)
         
         # 计算平均损失
         num_batches = len(self.train_loader)
@@ -793,7 +806,8 @@ def main(local_rank: int = -1):
             focal_gamma=cfg.FOCAL_LOSS_GAMMA,
             use_uncertainty_weighting=True,
             fixed_lambda_svo=cfg.MTL_LAMBDA_SVO,
-            fixed_lambda_sent=cfg.MTL_LAMBDA_SENT
+            fixed_lambda_sent=cfg.MTL_LAMBDA_SENT,
+            uncertainty_params=cfg.UNCERTAINTY_INIT_LOG_VAR
         )
         if is_main_process():
             logger.info("Using UncertaintyWeighted MultiTask Loss")
@@ -821,7 +835,7 @@ def main(local_rank: int = -1):
         if uncertainty_params:
             param_groups.append({
                 'params': list(uncertainty_params.values()),
-                'lr': cfg.LEARNING_RATE * 10  # 不确定性参数用更大的学习率
+                'lr': cfg.LEARNING_RATE * cfg.UNCERTAINTY_LR_MULTIPLIER  # 不确定性参数用更大的学习率
             })
             if is_main_process():
                 logger.info("Added uncertainty parameters to optimizer with 10x learning rate")

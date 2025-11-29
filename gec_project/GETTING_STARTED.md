@@ -164,6 +164,43 @@ python deploy/export_onnx.py --model_path experiments/best_model.pt --action ben
 - `USE_AMP`: 是否启用混合精度训练（默认True，强烈建议开启）
 - `GRADIENT_ACCUMULATION_STEPS`: 梯度累积步数（默认1，可增大以模拟更大batch）
 
+### ⭐ 新增模块配置（论文创新点）
+
+#### 模块一：句法-语义融合交互层
+- `USE_SYNTAX_SEMANTIC_FUSION`: 是否启用句法-语义融合层（默认True）
+- `SYNTAX_FUSION_USE_LAYER_NORM`: 融合后是否使用LayerNorm（默认True）
+
+> 该模块将SVO辅助任务的句法表示通过门控机制注入到GEC主任务中，公式：
+> `H_GEC_input = H_shared + G ⊙ T`
+
+#### 模块二：不确定性加权损失
+- `USE_UNCERTAINTY_WEIGHTING`: 是否使用不确定性动态加权（默认True）
+- `UNCERTAINTY_INIT_LOG_VAR`: 不确定性参数初始值（默认0.0，对应σ=1）
+- `UNCERTAINTY_LR_MULTIPLIER`: 不确定性参数的学习率倍数（默认10.0）
+
+> 该模块实现自适应多任务平衡，不确定性大的任务自动获得更小权重，公式：
+> `L_total = 1/2·exp(-s₁)·L_GEC + 1/2·exp(-s₂)·L_SVO + 1/2·exp(-s₃)·L_Sent + 1/2·(s₁+s₂+s₃)`
+
+#### 模块三：错误感知多实例句级分类头
+- `USE_ERROR_AWARE_SENT_HEAD`: 是否使用错误感知句级头（默认True）
+- `KEEP_LABEL_IDX`: KEEP标签在标签表中的索引（默认0）
+- `DETACH_ERROR_CONFIDENCE`: 是否detach错误置信度梯度（默认False，用于消融实验）
+
+> 该模块用GEC预测的错误置信度做注意力池化构造句级表示，显式对齐token-level与sentence-level
+
+### 消融实验配置
+如需进行消融实验，可将对应模块的开关设为 `False`：
+```python
+# 禁用句法-语义融合（消融实验A）
+USE_SYNTAX_SEMANTIC_FUSION = False
+
+# 禁用不确定性加权，使用固定权重（消融实验B）
+USE_UNCERTAINTY_WEIGHTING = False
+
+# 禁用错误感知句级头，使用简单[CLS]池化（消融实验C）
+USE_ERROR_AWARE_SENT_HEAD = False
+```
+
 ### AMP + DDP 性能预期（双4090）
 | 配置 | 每epoch时间 | 显存占用 |
 |------|------------|---------|
