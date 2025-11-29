@@ -216,7 +216,8 @@ class GECModelWithMTL(BertPreTrainedModel):
         use_syntax_semantic_fusion: bool = True,
         use_error_aware_sent_head: bool = True,
         keep_label_idx: int = 0,
-        detach_error_confidence: bool = False
+        detach_error_confidence: bool = False,
+        syntax_fusion_use_layer_norm: bool = True
     ):
         """
         Args:
@@ -227,6 +228,7 @@ class GECModelWithMTL(BertPreTrainedModel):
             use_error_aware_sent_head: 是否使用错误感知句级头
             keep_label_idx: KEEP标签在标签表中的索引
             detach_error_confidence: 是否detach错误置信度梯度（用于消融实验）
+            syntax_fusion_use_layer_norm: 句法-语义融合层是否使用LayerNorm
         """
         super().__init__(config)
         self.num_gec_labels = num_gec_labels
@@ -237,7 +239,11 @@ class GECModelWithMTL(BertPreTrainedModel):
         self.detach_error_confidence = detach_error_confidence
         
         # ==================== BERT Encoder ====================
-        self.bert = BertModel(config)
+        # 注意：当使用 ErrorAwareSentenceHead 时，不需要 BERT 的 pooler 层
+        # 如果不禁用，pooler 的参数不会参与梯度计算，导致 DDP 报错
+        # RuntimeError: Expected to have finished reduction in the prior iteration...
+        # Parameter indices which did not receive grad: 197 198 (bert.pooler.dense.weight/bias)
+        self.bert = BertModel(config, add_pooling_layer=not use_error_aware_sent_head)
         
         # Dropout
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -255,7 +261,7 @@ class GECModelWithMTL(BertPreTrainedModel):
         if use_syntax_semantic_fusion:
             self.syntax_semantic_interaction = SyntaxSemanticInteractionLayer(
                 hidden_size=config.hidden_size,
-                use_layer_norm=True  # 可以从config读取
+                use_layer_norm=syntax_fusion_use_layer_norm  # 从参数读取
             )
         else:
             self.syntax_semantic_interaction = None
@@ -376,7 +382,12 @@ class GECModelWithMTL(BertPreTrainedModel):
             )
         else:
             # 降级使用 [CLS] + Linear
-            pooled_output = outputs.pooler_output
+            # 注意：此时 add_pooling_layer=True，所以 pooler_output 可用
+            if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+                pooled_output = outputs.pooler_output
+            else:
+                # 备用方案：手动从 [CLS] token 获取表示
+                pooled_output = h_shared[:, 0, :]  # [B, d]
             pooled_output = self.dropout(pooled_output)
             sent_logits = self.sent_error_classifier(pooled_output)  # [B, 2]
         
@@ -430,7 +441,8 @@ def create_model(
     use_syntax_semantic_fusion: bool = True,
     use_error_aware_sent_head: bool = True,
     keep_label_idx: int = 0,
-    detach_error_confidence: bool = False
+    detach_error_confidence: bool = False,
+    syntax_fusion_use_layer_norm: bool = True
 ) -> GECModelWithMTL:
     """
     创建模型实例
@@ -444,6 +456,7 @@ def create_model(
         use_error_aware_sent_head: 是否使用错误感知句级头
         keep_label_idx: KEEP标签索引
         detach_error_confidence: 是否detach错误置信度梯度
+        syntax_fusion_use_layer_norm: 句法-语义融合层是否使用LayerNorm
     
     Returns:
         model: GECModelWithMTL实例
@@ -462,7 +475,8 @@ def create_model(
         use_syntax_semantic_fusion=use_syntax_semantic_fusion,
         use_error_aware_sent_head=use_error_aware_sent_head,
         keep_label_idx=keep_label_idx,
-        detach_error_confidence=detach_error_confidence
+        detach_error_confidence=detach_error_confidence,
+        syntax_fusion_use_layer_norm=syntax_fusion_use_layer_norm
     )
     
     model.to(device)

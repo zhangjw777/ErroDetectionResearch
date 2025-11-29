@@ -262,6 +262,27 @@ class GECTrainer:
                        f"gradient_accumulation_steps={self.gradient_accumulation_steps}, "
                        f"uncertainty_weighting={self.use_uncertainty_weighting}")
     
+    def _sync_uncertainty_gradients(self):
+        """
+        在 DDP 模式下同步不确定性参数的梯度
+        
+        由于 criterion (MultiTaskLossWithUncertainty) 没有被 DDP 包装，
+        其可学习参数 (log_var_*) 的梯度不会自动同步。
+        需要手动对这些参数的梯度进行 AllReduce 操作。
+        """
+        if not self.use_ddp or not self.use_uncertainty_weighting:
+            return
+        
+        uncertainty_params = self.criterion.get_uncertainty_params()
+        if uncertainty_params is None:
+            return
+        
+        for name, param in uncertainty_params.items():
+            if param.grad is not None:
+                # 对梯度进行 AllReduce (平均)
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                param.grad /= get_world_size()
+    
     def train_epoch(self) -> Dict[str, float]:
         """训练一个epoch（支持AMP、梯度累积和不确定性加权）"""
         self.model.train()
@@ -348,6 +369,12 @@ class GECTrainer:
                     self.model.parameters(),
                     max_norm=cfg.MAX_GRAD_NORM
                 )
+                
+                # DDP: 同步不确定性参数的梯度
+                # 注意：model 被 DDP 包装会自动同步梯度，但 criterion 没有被包装
+                # 需要手动对 criterion 中的可学习参数（log_var_*）进行梯度同步
+                if self.use_ddp and self.use_uncertainty_weighting:
+                    self._sync_uncertainty_gradients()
                 
                 # 更新参数
                 self.scaler.step(self.optimizer)
@@ -474,7 +501,8 @@ class GECTrainer:
             with autocast(device_type='cuda', enabled=self.use_amp):
                 gec_logits, svo_logits, sent_logits = self.model(
                     input_ids=input_ids,
-                    attention_mask=attention_mask
+                    attention_mask=attention_mask,
+                    label_mask=label_mask  # 修复：传入 label_mask 用于 ErrorAwareSentenceHead
                 )
                 
                 # 计算损失 - 支持两种接口
@@ -779,6 +807,8 @@ def main(local_rank: int = -1):
     use_syntax_semantic_fusion = getattr(cfg, 'USE_SYNTAX_SEMANTIC_FUSION', True)
     use_error_aware_sent_head = getattr(cfg, 'USE_ERROR_AWARE_SENT_HEAD', True)
     keep_label_idx = getattr(cfg, 'KEEP_LABEL_IDX', 0)
+    detach_error_confidence = getattr(cfg, 'DETACH_ERROR_CONFIDENCE', False)
+    syntax_fusion_use_layer_norm = getattr(cfg, 'SYNTAX_FUSION_USE_LAYER_NORM', True)
     
     model = create_model(
         bert_model_name=cfg.BERT_MODEL,
@@ -787,7 +817,9 @@ def main(local_rank: int = -1):
         device=device,
         use_syntax_semantic_fusion=use_syntax_semantic_fusion,
         use_error_aware_sent_head=use_error_aware_sent_head,
-        keep_label_idx=keep_label_idx
+        keep_label_idx=keep_label_idx,
+        detach_error_confidence=detach_error_confidence,
+        syntax_fusion_use_layer_norm=syntax_fusion_use_layer_norm
     )
     
     # DDP包装模型
