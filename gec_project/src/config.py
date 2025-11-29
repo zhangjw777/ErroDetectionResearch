@@ -125,6 +125,21 @@ NUM_WORKERS = 4  # DataLoader的worker数量
 USE_AMP = True  # 是否启用混合精度训练 (FP16)，4090上强烈建议开启
 GRADIENT_ACCUMULATION_STEPS = 1  # 梯度累积步数，增大等效batch_size
 
+# ==================== 新模块配置 ====================
+# 模块一：句法-语义融合交互层
+USE_SYNTAX_SEMANTIC_FUSION = True  # 是否使用句法-语义融合层
+SYNTAX_FUSION_USE_LAYER_NORM = True  # 融合后是否使用LayerNorm
+
+# 模块二：不确定性加权损失
+USE_UNCERTAINTY_WEIGHTING = True  # 是否使用不确定性动态加权
+UNCERTAINTY_INIT_LOG_VAR = 0.0  # 不确定性参数初始值 (对应σ=1)
+UNCERTAINTY_LR_MULTIPLIER = 10.0  # 不确定性参数的学习率倍数
+
+# 模块三：错误感知多实例句级分类头
+USE_ERROR_AWARE_SENT_HEAD = True  # 是否使用错误感知句级头
+KEEP_LABEL_IDX = 0  # KEEP标签在标签表中的索引
+DETACH_ERROR_CONFIDENCE = False  # 是否detach错误置信度梯度（用于消融实验）
+
 # 公文特有词汇（用于构建混淆集和介词集）
 PREPOSITIONS = ["通过", "经过", "在", "由于", "鉴于", "根据",
                 "依据", "按照", "依照", "遵照", "据", "特别是",
@@ -279,6 +294,21 @@ class Config:
         # 混合精度与分布式训练配置
         self.USE_AMP = self.use_amp = USE_AMP
         self.GRADIENT_ACCUMULATION_STEPS = self.gradient_accumulation_steps = GRADIENT_ACCUMULATION_STEPS
+        
+        # ==================== 新模块配置 ====================
+        # 模块一：句法-语义融合交互层
+        self.USE_SYNTAX_SEMANTIC_FUSION = self.use_syntax_semantic_fusion = USE_SYNTAX_SEMANTIC_FUSION
+        self.SYNTAX_FUSION_USE_LAYER_NORM = self.syntax_fusion_use_layer_norm = SYNTAX_FUSION_USE_LAYER_NORM
+        
+        # 模块二：不确定性加权损失
+        self.USE_UNCERTAINTY_WEIGHTING = self.use_uncertainty_weighting = USE_UNCERTAINTY_WEIGHTING
+        self.UNCERTAINTY_INIT_LOG_VAR = self.uncertainty_init_log_var = UNCERTAINTY_INIT_LOG_VAR
+        self.UNCERTAINTY_LR_MULTIPLIER = self.uncertainty_lr_multiplier = UNCERTAINTY_LR_MULTIPLIER
+        
+        # 模块三：错误感知多实例句级分类头
+        self.USE_ERROR_AWARE_SENT_HEAD = self.use_error_aware_sent_head = USE_ERROR_AWARE_SENT_HEAD
+        self.KEEP_LABEL_IDX = self.keep_label_idx = KEEP_LABEL_IDX
+        self.DETACH_ERROR_CONFIDENCE = self.detach_error_confidence = DETACH_ERROR_CONFIDENCE
         
     def to_dict(self):
         """转换为字典，方便保存和序列化"""
