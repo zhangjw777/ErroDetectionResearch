@@ -807,8 +807,8 @@ def main(local_rank: int = -1):
             use_uncertainty_weighting=True,
             fixed_lambda_svo=cfg.MTL_LAMBDA_SVO,
             fixed_lambda_sent=cfg.MTL_LAMBDA_SENT,
-            uncertainty_params=cfg.UNCERTAINTY_INIT_LOG_VAR
-        )
+            init_log_var=cfg.UNCERTAINTY_INIT_LOG_VAR
+        ).to(device)  # 关键：将损失函数模块移动到与模型相同的设备
         if is_main_process():
             logger.info("Using UncertaintyWeighted MultiTask Loss")
     else:
@@ -818,7 +818,7 @@ def main(local_rank: int = -1):
             focal_gamma=cfg.FOCAL_LOSS_GAMMA,
             mtl_lambda_svo=cfg.MTL_LAMBDA_SVO,
             mtl_lambda_sent=cfg.MTL_LAMBDA_SENT
-        )
+        ).to(device)  # 保持一致性，也移动到设备
         if is_main_process():
             logger.info("Using Fixed-weight MultiTask Loss")
     

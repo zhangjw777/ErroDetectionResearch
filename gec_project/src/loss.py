@@ -308,7 +308,13 @@ class UncertaintyWeightedLoss(nn.Module):
             total_loss: 加权后的总损失 (标量)
             loss_dict: 包含各项损失和不确定性参数的字典 (用于日志记录)
         """
+        # 确保参数与输入在同一设备上
+        # （当模型被 .to(device) 移动时，nn.Parameter 会自动移动，
+        #   但为了安全起见，这里显式检查）
+        device = loss_gec.device
+        
         # 计算任务权重 (精度): precision = exp(-log_var) = 1/σ²
+        # log_var 参数作为 nn.Parameter 会随模型 .to(device) 移动
         precision_gec = torch.exp(-self.log_var_gec)
         precision_svo = torch.exp(-self.log_var_svo)
         precision_sent = torch.exp(-self.log_var_sent)
