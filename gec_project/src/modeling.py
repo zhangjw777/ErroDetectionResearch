@@ -5,8 +5,8 @@
 架构包含：
 1. MacBERT Encoder - 共享表示 H_shared
 2. SVO Head - 句法成分识别 (辅助任务1)
-3. 句法-语义融合交互层 - 将 H_SVO 融合到 GEC 表示中
-4. GEC Head - 编辑标签预测 (主任务)
+3. 句法-语义融合交互层 - 将 H_SVO 融合到 GED 表示中
+4. GED Head - 编辑标签预测 (主任务，错误检测)
 5. 错误感知多实例句级分类头 - 句级错误检测 (辅助任务2)
 """
 import torch
@@ -26,12 +26,12 @@ class SyntaxSemanticInteractionLayer(nn.Module):
     句法-语义融合交互层 (Syntactic-Semantic Interaction Layer)
     
     将SVO辅助任务的句法表示与BERT的语义表示进行门控融合，
-    实现显式句法先验注入到GEC表示中。
+    实现显式句法先验注入到GED表示中。
     
     公式：
     - G = σ(W_g · [H_shared ; H_SVO] + b_g)  # 门控向量
     - T = W_t · H_SVO + b_t                  # 语法变换
-    - H_GEC_input = H_shared + G ⊙ T         # 门控融合
+    - H_GED_input = H_shared + G ⊙ T         # 门控融合
     
     Args:
         hidden_size: 隐藏层维度 (与BERT一致，默认768)
@@ -62,7 +62,7 @@ class SyntaxSemanticInteractionLayer(nn.Module):
             h_svo: [B, L, d] - SVO中间表示
         
         Returns:
-            h_gec_input: [B, L, d] - 融合后的表示，供GEC Head使用
+            h_ged_input: [B, L, d] - 融合后的表示，供GED Head使用
         """
         # 1. 拼接 H_shared 和 H_SVO: [B, L, 2d]
         concat = torch.cat([h_shared, h_svo], dim=-1)
@@ -73,14 +73,14 @@ class SyntaxSemanticInteractionLayer(nn.Module):
         # 3. 语法变换: T = W_t · H_SVO + b_t, [B, L, d]
         syntax_transformed = self.syntax_transform(h_svo)
         
-        # 4. 门控融合: H_GEC_input = H_shared + G ⊙ T
-        h_gec_input = h_shared + gate * syntax_transformed
+        # 4. 门控融合: H_GED_input = H_shared + G ⊙ T
+        h_ged_input = h_shared + gate * syntax_transformed
         
         # 5. 可选的LayerNorm
         if self.use_layer_norm:
-            h_gec_input = self.layer_norm(h_gec_input)
+            h_ged_input = self.layer_norm(h_ged_input)
         
-        return h_gec_input
+        return h_ged_input
 
 
 # ==================== 模块三：错误感知多实例句级分类头 ====================
@@ -89,11 +89,11 @@ class ErrorAwareSentenceHead(nn.Module):
     """
     错误感知多实例句级分类头 (Error-Aware Multi-Instance Head)
     
-    将句子视为token实例集合，使用GEC预测的错误置信度驱动的
+    将句子视为token实例集合，使用GED预测的错误置信度驱动的
     注意力池化构造句级表示，显式对齐token-level与sentence-level。
     
     核心思想：
-    - 从GEC Head获取每个token是KEEP的概率 P(KEEP)
+    - 从GED Head获取每个token是KEEP的概率 P(KEEP)
     - 错误置信度: e = 1 - P(KEEP)
     - 用错误置信度作为注意力权重做加权池化
     - 池化后的向量送入MLP做句级分类
@@ -134,7 +134,7 @@ class ErrorAwareSentenceHead(nn.Module):
     def forward(
         self,
         h_tokens: torch.Tensor,        # [B, L, d]
-        gec_logits: torch.Tensor,      # [B, L, C]
+        ged_logits: torch.Tensor,      # [B, L, C]
         valid_mask: torch.Tensor,      # [B, L] - 有效位置mask（真实字符位置，排除CLS/SEP/子词/padding）
         keep_label_idx: int = 0        # KEEP标签的索引
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -142,8 +142,8 @@ class ErrorAwareSentenceHead(nn.Module):
         前向传播
         
         Args:
-            h_tokens: [B, L, d] - token级表示 (融合后的H_GEC_input)
-            gec_logits: [B, L, C] - GEC Head的输出logits
+            h_tokens: [B, L, d] - token级表示 (融合后的H_GED_input)
+            ged_logits: [B, L, C] - GED Head的输出logits
             valid_mask: [B, L] - 有效位置mask (1=真实字符, 0=CLS/SEP/子词/padding)
                         这应该是 attention_mask * label_mask 的结果
             keep_label_idx: KEEP标签在标签表中的索引
@@ -155,12 +155,12 @@ class ErrorAwareSentenceHead(nn.Module):
         batch_size, seq_len, _ = h_tokens.shape
         
         # 1. 计算错误置信度: e = 1 - P(KEEP)
-        gec_probs = torch.softmax(gec_logits, dim=-1)  # [B, L, C]
-        p_keep = gec_probs[:, :, keep_label_idx]       # [B, L]
+        ged_probs = torch.softmax(ged_logits, dim=-1)  # [B, L, C]
+        p_keep = ged_probs[:, :, keep_label_idx]       # [B, L]
         error_confidence = 1 - p_keep                  # [B, L]
         
         # 1.5 可选：detach错误置信度（用于消融实验）
-        # 如果detach，则句级loss不会反向传播到GEC表示
+        # 如果detach，则句级loss不会反向传播到GED表示
         if self.detach_confidence:
             error_confidence = error_confidence.detach()
         
@@ -185,24 +185,24 @@ class ErrorAwareSentenceHead(nn.Module):
         return sent_logits, attention_weights
 
 
-class GECModelWithMTL(BertPreTrainedModel):
+class GEDModelWithMTL(BertPreTrainedModel):
     """
-    多任务学习的GEC模型
+    多任务学习的GED模型（错误检测）
     
     架构（按数据流顺序）：
     1. MacBERT Encoder -> H_shared [B, L, d]
     2. SVO中间表示生成 -> H_SVO [B, L, d]
     3. SVO Head (辅助任务1): H_SVO -> svo_logits  # 关键：SVO头使用H_SVO，确保句法表示被直接监督
-    4. 句法-语义融合层: (H_shared, H_SVO) -> H_GEC_input
-    5. GEC Head (主任务): H_GEC_input -> gec_logits
-    6. 错误感知句级头 (辅助任务2): (H_GEC_input, gec_logits, valid_mask) -> sent_logits
+    4. 句法-语义融合层: (H_shared, H_SVO) -> H_GED_input
+    5. GED Head (主任务): H_GED_input -> ged_logits
+    6. 错误感知句级头 (辅助任务2): (H_GED_input, ged_logits, valid_mask) -> sent_logits
     
     输入：
         input_ids: [batch_size, seq_len]
         attention_mask: [batch_size, seq_len]
     
     输出：
-        gec_logits: [batch_size, seq_len, num_gec_labels]
+        ged_logits: [batch_size, seq_len, num_ged_labels]
         svo_logits: [batch_size, seq_len, num_svo_labels]
         sent_logits: [batch_size, 2]
         (可选) attention_weights: [batch_size, seq_len] - 错误驱动注意力
@@ -211,7 +211,7 @@ class GECModelWithMTL(BertPreTrainedModel):
     def __init__(
         self, 
         config, 
-        num_gec_labels: int, 
+        num_ged_labels: int, 
         num_svo_labels: int,
         use_syntax_semantic_fusion: bool = True,
         use_error_aware_sent_head: bool = True,
@@ -222,7 +222,7 @@ class GECModelWithMTL(BertPreTrainedModel):
         """
         Args:
             config: BertConfig
-            num_gec_labels: GEC标签数量 (约5000)
+            num_ged_labels: GED标签数量（编辑标签，用于错误检测）
             num_svo_labels: SVO标签数量 (7)
             use_syntax_semantic_fusion: 是否使用句法-语义融合层
             use_error_aware_sent_head: 是否使用错误感知句级头
@@ -231,7 +231,7 @@ class GECModelWithMTL(BertPreTrainedModel):
             syntax_fusion_use_layer_norm: 句法-语义融合层是否使用LayerNorm
         """
         super().__init__(config)
-        self.num_gec_labels = num_gec_labels
+        self.num_ged_labels = num_ged_labels
         self.num_svo_labels = num_svo_labels
         self.use_syntax_semantic_fusion = use_syntax_semantic_fusion
         self.use_error_aware_sent_head = use_error_aware_sent_head
@@ -266,9 +266,9 @@ class GECModelWithMTL(BertPreTrainedModel):
         else:
             self.syntax_semantic_interaction = None
         
-        # ==================== GEC Head (主任务) ====================
-        # 使用融合后的 H_GEC_input 进行预测
-        self.gec_classifier = nn.Linear(config.hidden_size, num_gec_labels)
+        # ==================== GED Head (主任务) ====================
+        # 使用融合后的 H_GED_input 进行预测
+        self.ged_classifier = nn.Linear(config.hidden_size, num_ged_labels)
         
         # ==================== SVO Head (辅助任务1) ====================
         # **关键修改**：使用 H_SVO 进行预测，确保句法表示被直接监督
@@ -292,7 +292,7 @@ class GECModelWithMTL(BertPreTrainedModel):
         
         logger.info(
             f"Model initialized: "
-            f"{num_gec_labels} GEC labels, {num_svo_labels} SVO labels, "
+            f"{num_ged_labels} GED labels, {num_svo_labels} SVO labels, "
             f"syntax_fusion={use_syntax_semantic_fusion}, "
             f"error_aware_head={use_error_aware_sent_head}, "
             f"detach_error_confidence={detach_error_confidence}"
@@ -303,7 +303,7 @@ class GECModelWithMTL(BertPreTrainedModel):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
-        gec_labels: Optional[torch.Tensor] = None,
+        ged_labels: Optional[torch.Tensor] = None,
         svo_labels: Optional[torch.Tensor] = None,
         sent_labels: Optional[torch.Tensor] = None,
         label_mask: Optional[torch.Tensor] = None,
@@ -316,14 +316,14 @@ class GECModelWithMTL(BertPreTrainedModel):
             input_ids: [batch_size, seq_len]
             attention_mask: [batch_size, seq_len]
             token_type_ids: [batch_size, seq_len] (可选)
-            gec_labels: [batch_size, seq_len] (训练时提供)
+            ged_labels: [batch_size, seq_len] (训练时提供)
             svo_labels: [batch_size, seq_len] (训练时提供)
             sent_labels: [batch_size] (句子级别标签: 0/1)
             label_mask: [batch_size, seq_len] (标记哪些位置需要计算loss，1=真实字符)
             return_attention_weights: 是否返回错误驱动注意力权重
         
         Returns:
-            gec_logits: [B, L, num_gec_labels]
+            ged_logits: [B, L, num_ged_labels]
             svo_logits: [B, L, num_svo_labels]
             sent_logits: [B, 2]
             (可选) attention_weights: [B, L] - 当 return_attention_weights=True
@@ -351,22 +351,22 @@ class GECModelWithMTL(BertPreTrainedModel):
         
         # ==================== Step 4: 句法-语义融合 ====================
         if self.use_syntax_semantic_fusion and self.syntax_semantic_interaction is not None:
-            # 使用门控融合: H_GEC_input = H_shared + G ⊙ T
+            # 使用门控融合: H_GED_input = H_shared + G ⊙ T
             # H_SVO 现在是被 SVO 任务直接监督的句法表示
-            h_gec_input = self.syntax_semantic_interaction(h_shared, h_svo)
+            h_ged_input = self.syntax_semantic_interaction(h_shared, h_svo)
         else:
             # 不使用融合，直接使用 H_shared
-            h_gec_input = h_shared
+            h_ged_input = h_shared
         
-        # ==================== Step 5: GEC Head (使用融合后的表示) ====================
-        gec_logits = self.gec_classifier(h_gec_input)  # [B, L, num_gec_labels]
+        # ==================== Step 5: GED Head (使用融合后的表示) ====================
+        ged_logits = self.ged_classifier(h_ged_input)  # [B, L, num_ged_labels]
         
         # ==================== Step 6: 错误感知句级分类头 ====================
         attention_weights = None
         
         if self.use_error_aware_sent_head and self.sent_error_head is not None:
             # **关键修改**：构造 valid_mask = attention_mask * label_mask
-            # 确保只有真实字符位置参与"错误注意力"计算
+            # 确保只有真实字符位置参与“错误注意力”计算
             # 排除 [CLS], [SEP], 子词续接, padding
             if label_mask is not None:
                 valid_mask = attention_mask * label_mask
@@ -375,8 +375,8 @@ class GECModelWithMTL(BertPreTrainedModel):
             
             # 使用错误感知多实例头
             sent_logits, attention_weights = self.sent_error_head(
-                h_tokens=h_gec_input,
-                gec_logits=gec_logits,
+                h_tokens=h_ged_input,
+                ged_logits=ged_logits,
                 valid_mask=valid_mask,  # 使用 valid_mask 而非 attention_mask
                 keep_label_idx=self.keep_label_idx
             )
@@ -393,9 +393,9 @@ class GECModelWithMTL(BertPreTrainedModel):
         
         # ==================== 返回结果 ====================
         if return_attention_weights and attention_weights is not None:
-            return gec_logits, svo_logits, sent_logits, attention_weights
+            return ged_logits, svo_logits, sent_logits, attention_weights
         else:
-            return gec_logits, svo_logits, sent_logits
+            return ged_logits, svo_logits, sent_logits
     
     def get_encoder_output(
         self,
@@ -415,19 +415,19 @@ class GECModelWithMTL(BertPreTrainedModel):
         return outputs.last_hidden_state
 
 
-class GECModelConfig:
+class GEDModelConfig:
     """模型配置辅助类"""
     
     def __init__(
         self,
         bert_model_name: str = "hfl/chinese-macbert-base",
-        num_gec_labels: int = 5000,
+        num_ged_labels: int = 5000,
         num_svo_labels: int = 7,
         hidden_dropout_prob: float = 0.1,
         max_position_embeddings: int = 512,
     ):
         self.bert_model_name = bert_model_name
-        self.num_gec_labels = num_gec_labels
+        self.num_ged_labels = num_ged_labels
         self.num_svo_labels = num_svo_labels
         self.hidden_dropout_prob = hidden_dropout_prob
         self.max_position_embeddings = max_position_embeddings
@@ -435,7 +435,7 @@ class GECModelConfig:
 
 def create_model(
     bert_model_name: str,
-    num_gec_labels: int,
+    num_ged_labels: int,
     num_svo_labels: int,
     device: str = "cuda",
     use_syntax_semantic_fusion: bool = True,
@@ -443,13 +443,13 @@ def create_model(
     keep_label_idx: int = 0,
     detach_error_confidence: bool = False,
     syntax_fusion_use_layer_norm: bool = True
-) -> GECModelWithMTL:
+) -> GEDModelWithMTL:
     """
     创建模型实例
     
     Args:
         bert_model_name: 预训练BERT模型名称
-        num_gec_labels: GEC标签数量
+        num_ged_labels: GED标签数量
         num_svo_labels: SVO标签数量
         device: 设备 (cuda/cpu)
         use_syntax_semantic_fusion: 是否使用句法-语义融合层
@@ -459,7 +459,7 @@ def create_model(
         syntax_fusion_use_layer_norm: 句法-语义融合层是否使用LayerNorm
     
     Returns:
-        model: GECModelWithMTL实例
+        model: GEDModelWithMTL实例
     """
     from transformers import BertConfig
     
@@ -467,10 +467,10 @@ def create_model(
     config = BertConfig.from_pretrained(bert_model_name)
     
     # 创建模型
-    model = GECModelWithMTL.from_pretrained(
+    model = GEDModelWithMTL.from_pretrained(
         bert_model_name,
         config=config,
-        num_gec_labels=num_gec_labels,
+        num_ged_labels=num_ged_labels,
         num_svo_labels=num_svo_labels,
         use_syntax_semantic_fusion=use_syntax_semantic_fusion,
         use_error_aware_sent_head=use_error_aware_sent_head,

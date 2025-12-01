@@ -10,8 +10,8 @@ import logging
 import argparse
 
 from config import default_config as cfg
-from modeling import GECModelWithMTL
-from predictor import GECPredictor
+from modeling import GEDModelWithMTL
+from predictor import GEDPredictor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,12 +37,12 @@ def export_to_onnx(
     
     # 假设有label_map
     from dataset import build_label_maps
-    gec_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
+    ged_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
     
     from modeling import create_model
     model = create_model(
         bert_model_name=cfg.BERT_MODEL,
-        num_gec_labels=len(gec_label_map),
+        num_ged_labels=len(ged_label_map),
         num_svo_labels=len(svo_label_map),
         device='cpu'
     )
@@ -68,11 +68,11 @@ def export_to_onnx(
         (dummy_input_ids, dummy_attention_mask),
         output_path,
         input_names=['input_ids', 'attention_mask'],
-        output_names=['gec_logits', 'svo_logits'],
+        output_names=['ged_logits', 'svo_logits'],
         dynamic_axes={
             'input_ids': {0: 'batch_size', 1: 'sequence_length'},
             'attention_mask': {0: 'batch_size', 1: 'sequence_length'},
-            'gec_logits': {0: 'batch_size', 1: 'sequence_length'},
+            'ged_logits': {0: 'batch_size', 1: 'sequence_length'},
             'svo_logits': {0: 'batch_size', 1: 'sequence_length'},
         },
         opset_version=cfg.ONNX_OPSET_VERSION,
@@ -104,12 +104,12 @@ def quantize_model(
     checkpoint = torch.load(model_path, map_location='cpu')
     
     from dataset import build_label_maps
-    gec_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
+    ged_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
     
     from modeling import create_model
     model = create_model(
         bert_model_name=cfg.BERT_MODEL,
-        num_gec_labels=len(gec_label_map),
+        num_ged_labels=len(ged_label_map),
         num_svo_labels=len(svo_label_map),
         device='cpu'
     )
@@ -156,7 +156,7 @@ def benchmark_inference(
     logger.info(f"Benchmarking inference speed...")
     
     # 创建预测器
-    predictor = GECPredictor(
+    predictor = GEDPredictor(
         model_path=model_path,
         vocab_dir=str(cfg.VOCAB_DIR),
         device='cpu'

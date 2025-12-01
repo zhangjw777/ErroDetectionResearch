@@ -18,9 +18,9 @@ class FocalLoss(nn.Module):
     
     公式: FL(p_t) = -α(1-p_t)^γ * log(p_t)
     
-    用于解决GEC任务中极度不平衡的问题：
+    用于解决GED任务中极度不平衡的问题：
     - 90%以上的token是$KEEP
-    - 错误token非常稀疏
+    - 错误 token非常稀疏
     
     Args:
         alpha: 类别权重 (针对$KEEP类)
@@ -123,10 +123,10 @@ class MultiTaskLoss(nn.Module):
     """
     多任务联合损失
     
-    L_total = L_GEC + λ1 * L_SVO + λ2 * L_SENT
+    L_total = L_GED + λ1 * L_SVO + λ2 * L_SENT
     
     其中：
-    - L_GEC使用Focal Loss (主任务)
+    - L_GED使用Focal Loss (主任务)
     - L_SVO使用标准CrossEntropy (辅助任务1)
     - L_SENT使用标准CrossEntropy (辅助任务2: 句级错误检测)
     """
@@ -172,10 +172,10 @@ class MultiTaskLoss(nn.Module):
     
     def forward(
         self,
-        gec_logits: torch.Tensor,
+        ged_logits: torch.Tensor,
         svo_logits: torch.Tensor,
         sent_logits: torch.Tensor,
-        gec_labels: torch.Tensor,
+        ged_labels: torch.Tensor,
         svo_labels: torch.Tensor,
         sent_labels: torch.Tensor,
         label_mask: Optional[torch.Tensor] = None
@@ -184,19 +184,19 @@ class MultiTaskLoss(nn.Module):
         计算联合损失
         
         Args:
-            gec_logits: [B, L, num_gec_labels]
+            ged_logits: [B, L, num_ged_labels]
             svo_logits: [B, L, num_svo_labels]
             sent_logits: [B, 2] (句级错误检测)
-            gec_labels: [B, L]
+            ged_labels: [B, L]
             svo_labels: [B, L]
             sent_labels: [B] (0=正确, 1=有错)
             label_mask: [B, L]
         
         Returns:
-            (total_loss, gec_loss, svo_loss, sent_loss)
+            (total_loss, ged_loss, svo_loss, sent_loss)
         """
-        # GEC损失 (Focal Loss)
-        gec_loss = self.focal_loss(gec_logits, gec_labels, label_mask)
+        # GED损失 (Focal Loss)
+        ged_loss = self.focal_loss(ged_logits, ged_labels, label_mask)
         
         # SVO损失 (CrossEntropy)
         svo_logits_flat = svo_logits.view(-1, svo_logits.size(-1))
@@ -207,9 +207,9 @@ class MultiTaskLoss(nn.Module):
         sent_loss = self.sent_ce_loss(sent_logits, sent_labels)
         
         # 总损失
-        total_loss = gec_loss + self.mtl_lambda_svo * svo_loss + self.mtl_lambda_sent * sent_loss
+        total_loss = ged_loss + self.mtl_lambda_svo * svo_loss + self.mtl_lambda_sent * sent_loss
         
-        return total_loss, gec_loss, svo_loss, sent_loss
+        return total_loss, ged_loss, svo_loss, sent_loss
 
 
 class WeightedCrossEntropyLoss(nn.Module):
@@ -284,7 +284,7 @@ class UncertaintyWeightedLoss(nn.Module):
         
         # 可学习的对数方差参数: s_i = log(σ_i²)
         # 初始化为 init_log_var，对应 σ = exp(s/2)
-        self.log_var_gec = nn.Parameter(torch.tensor([init_log_var]))
+        self.log_var_ged = nn.Parameter(torch.tensor([init_log_var]))
         self.log_var_svo = nn.Parameter(torch.tensor([init_log_var]))
         self.log_var_sent = nn.Parameter(torch.tensor([init_log_var]))
         
@@ -292,7 +292,7 @@ class UncertaintyWeightedLoss(nn.Module):
     
     def forward(
         self,
-        loss_gec: torch.Tensor,
+        loss_ged: torch.Tensor,
         loss_svo: torch.Tensor,
         loss_sent: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -300,7 +300,7 @@ class UncertaintyWeightedLoss(nn.Module):
         计算不确定性加权的总损失
         
         Args:
-            loss_gec: GEC主任务损失 (可以是Focal Loss)
+            loss_ged: GED主任务损失 (可以是Focal Loss)
             loss_svo: SVO辅助任务损失
             loss_sent: 句级错误检测损失
         
@@ -311,25 +311,25 @@ class UncertaintyWeightedLoss(nn.Module):
         # 确保参数与输入在同一设备上
         # （当模型被 .to(device) 移动时，nn.Parameter 会自动移动，
         #   但为了安全起见，这里显式检查）
-        device = loss_gec.device
+        device = loss_ged.device
         
         # 计算任务权重 (精度): precision = exp(-log_var) = 1/σ²
         # log_var 参数作为 nn.Parameter 会随模型 .to(device) 移动
-        precision_gec = torch.exp(-self.log_var_gec)
+        precision_ged = torch.exp(-self.log_var_ged)
         precision_svo = torch.exp(-self.log_var_svo)
         precision_sent = torch.exp(-self.log_var_sent)
         
         # 加权损失: 0.5 * precision * loss
-        weighted_gec = 0.5 * precision_gec * loss_gec
+        weighted_ged = 0.5 * precision_ged * loss_ged
         weighted_svo = 0.5 * precision_svo * loss_svo
         weighted_sent = 0.5 * precision_sent * loss_sent
         
         # 正则项: 0.5 * (s₁ + s₂ + s₃)
         # 防止 σ 无限增大导致所有任务权重趋近于 0
-        regularization = 0.5 * (self.log_var_gec + self.log_var_svo + self.log_var_sent)
+        regularization = 0.5 * (self.log_var_ged + self.log_var_svo + self.log_var_sent)
         
         # 总损失
-        total_loss = weighted_gec + weighted_svo + weighted_sent + regularization
+        total_loss = weighted_ged + weighted_svo + weighted_sent + regularization
         
         # 将 total_loss 从 [1] 变为标量
         total_loss = total_loss.squeeze()
@@ -338,23 +338,23 @@ class UncertaintyWeightedLoss(nn.Module):
         loss_dict = {
             # 原始损失
             'loss_total': total_loss.item(),
-            'loss_gec': loss_gec.item(),
+            'loss_ged': loss_ged.item(),
             'loss_svo': loss_svo.item(),
             'loss_sent': loss_sent.item(),
             # 加权后的损失
-            'weighted_gec': weighted_gec.item(),
+            'weighted_ged': weighted_ged.item(),
             'weighted_svo': weighted_svo.item(),
             'weighted_sent': weighted_sent.item(),
             # 对数方差 (可学习参数)
-            'log_var_gec': self.log_var_gec.item(),
+            'log_var_ged': self.log_var_ged.item(),
             'log_var_svo': self.log_var_svo.item(),
             'log_var_sent': self.log_var_sent.item(),
             # 标准差 σ = exp(s/2)
-            'sigma_gec': torch.exp(0.5 * self.log_var_gec).item(),
+            'sigma_ged': torch.exp(0.5 * self.log_var_ged).item(),
             'sigma_svo': torch.exp(0.5 * self.log_var_svo).item(),
             'sigma_sent': torch.exp(0.5 * self.log_var_sent).item(),
             # 任务权重 (精度) = exp(-s)
-            'weight_gec': precision_gec.item(),
+            'weight_ged': precision_ged.item(),
             'weight_svo': precision_svo.item(),
             'weight_sent': precision_sent.item(),
         }
@@ -370,7 +370,7 @@ class UncertaintyWeightedLoss(nn.Module):
         """
         with torch.no_grad():
             return {
-                'gec': torch.exp(-self.log_var_gec).item(),
+                'ged': torch.exp(-self.log_var_ged).item(),
                 'svo': torch.exp(-self.log_var_svo).item(),
                 'sent': torch.exp(-self.log_var_sent).item(),
             }
@@ -384,7 +384,7 @@ class UncertaintyWeightedLoss(nn.Module):
         """
         with torch.no_grad():
             return {
-                'gec': torch.exp(0.5 * self.log_var_gec).item(),
+                'ged': torch.exp(0.5 * self.log_var_ged).item(),
                 'svo': torch.exp(0.5 * self.log_var_svo).item(),
                 'sent': torch.exp(0.5 * self.log_var_sent).item(),
             }
@@ -395,7 +395,7 @@ class MultiTaskLossWithUncertainty(nn.Module):
     集成不确定性加权的多任务损失
     
     整合了：
-    - GEC任务的Focal Loss
+    - GED任务的Focal Loss
     - SVO任务的CrossEntropy
     - 句级任务的CrossEntropy
     - 不确定性动态加权
@@ -429,7 +429,7 @@ class MultiTaskLossWithUncertainty(nn.Module):
         self.fixed_lambda_svo = fixed_lambda_svo
         self.fixed_lambda_sent = fixed_lambda_sent
         
-        # GEC任务使用Focal Loss
+        # GED任务使用Focal Loss
         self.focal_loss = FocalLoss(
             alpha=focal_alpha,
             gamma=focal_gamma,
@@ -460,10 +460,10 @@ class MultiTaskLossWithUncertainty(nn.Module):
     
     def forward(
         self,
-        gec_logits: torch.Tensor,
+        ged_logits: torch.Tensor,
         svo_logits: torch.Tensor,
         sent_logits: torch.Tensor,
-        gec_labels: torch.Tensor,
+        ged_labels: torch.Tensor,
         svo_labels: torch.Tensor,
         sent_labels: torch.Tensor,
         label_mask: Optional[torch.Tensor] = None
@@ -472,10 +472,10 @@ class MultiTaskLossWithUncertainty(nn.Module):
         计算多任务联合损失
         
         Args:
-            gec_logits: [B, L, num_gec_labels]
+            ged_logits: [B, L, num_ged_labels]
             svo_logits: [B, L, num_svo_labels]
             sent_logits: [B, 2]
-            gec_labels: [B, L]
+            ged_labels: [B, L]
             svo_labels: [B, L]
             sent_labels: [B]
             label_mask: [B, L]
@@ -484,8 +484,8 @@ class MultiTaskLossWithUncertainty(nn.Module):
             total_loss: 总损失
             loss_dict: 损失详情字典
         """
-        # 1. 计算GEC损失 (Focal Loss)
-        gec_loss = self.focal_loss(gec_logits, gec_labels, label_mask)
+        # 1. 计算GED损失 (Focal Loss)
+        ged_loss = self.focal_loss(ged_logits, ged_labels, label_mask)
         
         # 2. 计算SVO损失 (CrossEntropy)
         svo_logits_flat = svo_logits.view(-1, svo_logits.size(-1))
@@ -498,13 +498,13 @@ class MultiTaskLossWithUncertainty(nn.Module):
         # 4. 计算总损失
         if self.use_uncertainty_weighting and self.uncertainty_weighter is not None:
             # 使用不确定性加权
-            total_loss, loss_dict = self.uncertainty_weighter(gec_loss, svo_loss, sent_loss)
+            total_loss, loss_dict = self.uncertainty_weighter(ged_loss, svo_loss, sent_loss)
         else:
             # 使用固定权重
-            total_loss = gec_loss + self.fixed_lambda_svo * svo_loss + self.fixed_lambda_sent * sent_loss
+            total_loss = ged_loss + self.fixed_lambda_svo * svo_loss + self.fixed_lambda_sent * sent_loss
             loss_dict = {
                 'loss_total': total_loss.item(),
-                'loss_gec': gec_loss.item(),
+                'loss_ged': ged_loss.item(),
                 'loss_svo': svo_loss.item(),
                 'loss_sent': sent_loss.item(),
             }
@@ -520,7 +520,7 @@ class MultiTaskLossWithUncertainty(nn.Module):
         """
         if self.use_uncertainty_weighting and self.uncertainty_weighter is not None:
             return {
-                'log_var_gec': self.uncertainty_weighter.log_var_gec,
+                'log_var_ged': self.uncertainty_weighter.log_var_ged,
                 'log_var_svo': self.uncertainty_weighter.log_var_svo,
                 'log_var_sent': self.uncertainty_weighter.log_var_sent,
             }
@@ -556,14 +556,14 @@ if __name__ == "__main__":
     sent_labels = torch.ones(batch_size, dtype=torch.long)  # 假设都有错
     
     mtl_loss = MultiTaskLoss(focal_alpha=0.25, focal_gamma=2.0, mtl_lambda_svo=0.5, mtl_lambda_sent=0.3)
-    total_loss, gec_loss, svo_loss, sent_loss = mtl_loss(
+    total_loss, ged_loss, svo_loss, sent_loss = mtl_loss(
         logits, svo_logits, sent_logits,
         targets, svo_labels, sent_labels,
         label_mask
     )
     
     print(f"Total Loss: {total_loss.item():.4f}")
-    print(f"GEC Loss: {gec_loss.item():.4f}")
+    print(f"GED Loss: {ged_loss.item():.4f}")
     print(f"SVO Loss: {svo_loss.item():.4f}")
     print(f"Sent Loss: {sent_loss.item():.4f}")
     
@@ -572,12 +572,12 @@ if __name__ == "__main__":
     print("Testing Uncertainty Weighted Loss...")
     
     # 模拟三个任务的损失
-    loss_gec = torch.tensor(2.5)
+    loss_ged = torch.tensor(2.5)
     loss_svo = torch.tensor(1.2)
     loss_sent = torch.tensor(0.8)
     
     uncertainty_loss = UncertaintyWeightedLoss(init_log_var=0.0)
-    total, loss_dict = uncertainty_loss(loss_gec, loss_svo, loss_sent)
+    total, loss_dict = uncertainty_loss(loss_ged, loss_svo, loss_sent)
     
     print(f"Total Loss: {total.item():.4f}")
     print(f"Task Weights: {uncertainty_loss.get_task_weights()}")
@@ -601,6 +601,6 @@ if __name__ == "__main__":
     
     print(f"Total Loss: {total_loss.item():.4f}")
     print(f"Loss Dict Keys: {list(loss_dict.keys())}")
-    print(f"GEC Weight: {loss_dict.get('weight_gec', 'N/A')}")
+    print(f"GED Weight: {loss_dict.get('weight_ged', 'N/A')}")
     print(f"SVO Weight: {loss_dict.get('weight_svo', 'N/A')}")
     print(f"Sent Weight: {loss_dict.get('weight_sent', 'N/A')}")

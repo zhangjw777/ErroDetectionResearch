@@ -14,15 +14,15 @@ from pathlib import Path
 import json
 
 from config import default_config as cfg
-from modeling import GECModelWithMTL
+from modeling import GEDModelWithMTL
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class GECPredictor:
+class GEDPredictor:
     """
-    GEC推理器
+    GED推理器（错误检测）
     
     流程：
     1. 对输入文本进行tokenization
@@ -48,8 +48,8 @@ class GECPredictor:
         self.tokenizer = BertTokenizer.from_pretrained(cfg.BERT_MODEL)
         
         # 加载标签映射
-        self.gec_label_map, self.svo_label_map = self._load_label_maps(vocab_dir)
-        self.id2gec_label = {v: k for k, v in self.gec_label_map.items()}
+        self.ged_label_map, self.svo_label_map = self._load_label_maps(vocab_dir)
+        self.id2ged_label = {v: k for k, v in self.ged_label_map.items()}
         
         # 加载模型
         self.model = self._load_model(model_path)
@@ -59,11 +59,11 @@ class GECPredictor:
     
     def _load_label_maps(self, vocab_dir: str) -> Tuple[Dict, Dict]:
         """加载标签映射"""
-        # GEC标签
-        gec_label_path = Path(vocab_dir) / "label_map.txt"
-        with open(gec_label_path, 'r', encoding='utf-8') as f:
-            gec_labels = [line.strip() for line in f]
-        gec_label_map = {label: idx for idx, label in enumerate(gec_labels)}
+        # GED标签
+        ged_label_path = Path(vocab_dir) / "label_map.txt"
+        with open(ged_label_path, 'r', encoding='utf-8') as f:
+            ged_labels = [line.strip() for line in f]
+        ged_label_map = {label: idx for idx, label in enumerate(ged_labels)}
         
         # SVO标签
         svo_label_path = Path(vocab_dir) / "svo_labels.txt"
@@ -74,20 +74,20 @@ class GECPredictor:
         # 创建反向映射
         self.id2svo_label = {v: k for k, v in svo_label_map.items()}
         
-        return gec_label_map, svo_label_map
+        return ged_label_map, svo_label_map
     
-    def _load_model(self, model_path: str) -> GECModelWithMTL:
+    def _load_model(self, model_path: str) -> GEDModelWithMTL:
         """加载模型"""
         checkpoint = torch.load(model_path, map_location=self.device)
         
         # 获取模型配置
-        num_gec_labels = len(self.gec_label_map)
+        num_ged_labels = len(self.ged_label_map)
         num_svo_labels = len(self.svo_label_map)
         
         from modeling import create_model
         model = create_model(
             bert_model_name=cfg.BERT_MODEL,
-            num_gec_labels=num_gec_labels,
+            num_ged_labels=num_ged_labels,
             num_svo_labels=num_svo_labels,
             device=self.device
         )
@@ -317,7 +317,7 @@ def main():
         return
     
     # 创建预测器
-    predictor = GECPredictor(
+    predictor = GEDPredictor(
         model_path=str(model_path),
         vocab_dir=str(vocab_dir),
         device='cuda' if torch.cuda.is_available() else 'cpu'

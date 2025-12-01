@@ -27,9 +27,9 @@ from typing import Dict, Tuple, Optional
 from datetime import datetime
 
 from config import default_config as cfg
-from modeling import GECModelWithMTL
+from modeling import GEDModelWithMTL
 from loss import MultiTaskLoss, MultiTaskLossWithUncertainty
-from dataset import GECDataset, build_label_maps
+from dataset import GEDDataset, build_label_maps
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def create_ddp_dataloaders(
     train_path: str,
     dev_path: str,
     tokenizer,
-    gec_label_map: Dict,
+    ged_label_map: Dict,
     svo_label_map: Dict,
     batch_size: int = 32,
     num_workers: int = 4,
@@ -122,11 +122,11 @@ def create_ddp_dataloaders(
     Returns:
         train_loader, dev_loader, train_sampler (用于每个epoch设置)
     """
-    train_dataset = GECDataset(
-        train_path, tokenizer, gec_label_map, svo_label_map, max_length=max_length
+    train_dataset = GEDDataset(
+        train_path, tokenizer, ged_label_map, svo_label_map, max_length=max_length
     )
-    dev_dataset = GECDataset(
-        dev_path, tokenizer, gec_label_map, svo_label_map, max_length=max_length
+    dev_dataset = GEDDataset(
+        dev_path, tokenizer, ged_label_map, svo_label_map, max_length=max_length
     )
     
     train_sampler = None
@@ -167,9 +167,9 @@ def create_ddp_dataloaders(
     return train_loader, dev_loader, train_sampler
 
 
-class GECTrainer:
+class GEDTrainer:
     """
-    GEC模型训练器 (支持AMP + DDP + 不确定性加权)
+    GED模型训练器 (支持AMP + DDP + 不确定性加权)
     
     功能：
     - 混合精度训练 (AMP/FP16)
@@ -231,10 +231,10 @@ class GECTrainer:
         
         # 用于记录不确定性参数的历史
         self.uncertainty_history = {
-            'log_var_gec': [],
+            'log_var_ged': [],
             'log_var_svo': [],
             'log_var_sent': [],
-            'sigma_gec': [],
+            'sigma_ged': [],
             'sigma_svo': [],
             'sigma_sent': [],
         }
@@ -292,12 +292,12 @@ class GECTrainer:
             self.train_sampler.set_epoch(self.current_epoch)
         
         total_loss = 0.0
-        total_gec_loss = 0.0
+        total_ged_loss = 0.0
         total_svo_loss = 0.0
         total_sent_loss = 0.0
         
         # 累积不确定性参数 (如果使用)
-        accumulated_log_vars = {'gec': 0.0, 'svo': 0.0, 'sent': 0.0}
+        accumulated_log_vars = {'ged': 0.0, 'svo': 0.0, 'sent': 0.0}
         
         # 仅主进程显示进度条
         if is_main_process():
@@ -311,17 +311,17 @@ class GECTrainer:
             # 移动到设备
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            gec_labels = batch['gec_labels'].to(self.device)
+            ged_labels = batch['ged_labels'].to(self.device)
             svo_labels = batch['svo_labels'].to(self.device)
             sent_labels = batch['sent_label'].to(self.device)
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播 (使用AMP)
             with autocast(device_type='cuda', enabled=self.use_amp):
-                gec_logits, svo_logits, sent_logits = self.model(
+                ged_logits, svo_logits, sent_logits = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    gec_labels=gec_labels,
+                    ged_labels=ged_labels,
                     svo_labels=svo_labels,
                     sent_labels=sent_labels,
                     label_mask=label_mask
@@ -331,27 +331,27 @@ class GECTrainer:
                 if self.use_uncertainty_weighting:
                     # 新接口：返回 (total_loss, loss_dict)
                     loss, loss_dict = self.criterion(
-                        gec_logits, svo_logits, sent_logits,
-                        gec_labels, svo_labels, sent_labels,
+                        ged_logits, svo_logits, sent_logits,
+                        ged_labels, svo_labels, sent_labels,
                         label_mask
                     )
-                    gec_loss = loss_dict['loss_gec']
+                    ged_loss = loss_dict['loss_ged']
                     svo_loss = loss_dict['loss_svo']
                     sent_loss = loss_dict['loss_sent']
                     
                     # 累积不确定性参数
-                    if 'log_var_gec' in loss_dict:
-                        accumulated_log_vars['gec'] += loss_dict['log_var_gec']
+                    if 'log_var_ged' in loss_dict:
+                        accumulated_log_vars['ged'] += loss_dict['log_var_ged']
                         accumulated_log_vars['svo'] += loss_dict['log_var_svo']
                         accumulated_log_vars['sent'] += loss_dict['log_var_sent']
                 else:
-                    # 旧接口：返回 (total_loss, gec_loss, svo_loss, sent_loss)
-                    loss, gec_loss, svo_loss, sent_loss = self.criterion(
-                        gec_logits, svo_logits, sent_logits,
-                        gec_labels, svo_labels, sent_labels,
+                    # 旧接口：返回 (total_loss, ged_loss, svo_loss, sent_loss)
+                    loss, ged_loss, svo_loss, sent_loss = self.criterion(
+                        ged_logits, svo_logits, sent_logits,
+                        ged_labels, svo_labels, sent_labels,
                         label_mask
                     )
-                    gec_loss = gec_loss.item()
+                    ged_loss = ged_loss.item()
                     svo_loss = svo_loss.item()
                     sent_loss = sent_loss.item()
                 
@@ -387,7 +387,7 @@ class GECTrainer:
             # 累计损失 (还原缩放后的损失)
             actual_loss = loss.item() * self.gradient_accumulation_steps
             total_loss += actual_loss
-            total_gec_loss += gec_loss if isinstance(gec_loss, float) else gec_loss
+            total_ged_loss += ged_loss if isinstance(ged_loss, float) else ged_loss
             total_svo_loss += svo_loss if isinstance(svo_loss, float) else svo_loss
             total_sent_loss += sent_loss if isinstance(sent_loss, float) else sent_loss
             
@@ -395,77 +395,77 @@ class GECTrainer:
             if is_main_process() and hasattr(progress_bar, 'set_postfix'):
                 postfix = {
                     'loss': f"{actual_loss:.4f}",
-                    'gec': f"{gec_loss:.4f}",
+                    'ged': f"{ged_loss:.4f}",
                     'svo': f"{svo_loss:.4f}",
                     'sent': f"{sent_loss:.4f}",
                     'lr': f"{self.scheduler.get_last_lr()[0]:.2e}"
                 }
                 # 如果使用不确定性加权，显示任务权重
-                if self.use_uncertainty_weighting and 'weight_gec' in loss_dict:
-                    postfix['w_gec'] = f"{loss_dict['weight_gec']:.2f}"
+                if self.use_uncertainty_weighting and 'weight_ged' in loss_dict:
+                    postfix['w_ged'] = f"{loss_dict['weight_ged']:.2f}"
                 progress_bar.set_postfix(postfix)
             
             # TensorBoard记录 (仅主进程)
             if self.writer and batch_idx % cfg.LOG_INTERVAL == 0:
                 self.writer.add_scalar('train/loss', actual_loss, self.global_step)
-                self.writer.add_scalar('train/gec_loss', gec_loss, self.global_step)
+                self.writer.add_scalar('train/ged_loss', ged_loss, self.global_step)
                 self.writer.add_scalar('train/svo_loss', svo_loss, self.global_step)
                 self.writer.add_scalar('train/sent_loss', sent_loss, self.global_step)
                 
                 # 记录不确定性参数 (详细记录)
-                if self.use_uncertainty_weighting and 'log_var_gec' in loss_dict:
+                if self.use_uncertainty_weighting and 'log_var_ged' in loss_dict:
                     # 对数方差 s = log(σ²)
-                    self.writer.add_scalar('uncertainty/log_var_gec', loss_dict['log_var_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/log_var_ged', loss_dict['log_var_ged'], self.global_step)
                     self.writer.add_scalar('uncertainty/log_var_svo', loss_dict['log_var_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/log_var_sent', loss_dict['log_var_sent'], self.global_step)
                     
                     # 任务权重 = exp(-s) = 1/σ²
-                    self.writer.add_scalar('uncertainty/weight_gec', loss_dict['weight_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/weight_ged', loss_dict['weight_ged'], self.global_step)
                     self.writer.add_scalar('uncertainty/weight_svo', loss_dict['weight_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/weight_sent', loss_dict['weight_sent'], self.global_step)
                     
                     # 标准差 σ = exp(s/2)
-                    self.writer.add_scalar('uncertainty/sigma_gec', loss_dict['sigma_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/sigma_ged', loss_dict['sigma_ged'], self.global_step)
                     self.writer.add_scalar('uncertainty/sigma_svo', loss_dict['sigma_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/sigma_sent', loss_dict['sigma_sent'], self.global_step)
                     
                     # 加权后的损失
-                    self.writer.add_scalar('uncertainty/weighted_gec', loss_dict['weighted_gec'], self.global_step)
+                    self.writer.add_scalar('uncertainty/weighted_ged', loss_dict['weighted_ged'], self.global_step)
                     self.writer.add_scalar('uncertainty/weighted_svo', loss_dict['weighted_svo'], self.global_step)
                     self.writer.add_scalar('uncertainty/weighted_sent', loss_dict['weighted_sent'], self.global_step)
         
         # 计算平均损失
         num_batches = len(self.train_loader)
         avg_loss = total_loss / num_batches
-        avg_gec_loss = total_gec_loss / num_batches
+        avg_ged_loss = total_ged_loss / num_batches
         avg_svo_loss = total_svo_loss / num_batches
         avg_sent_loss = total_sent_loss / num_batches
         
         # 记录 epoch 级别的不确定性参数
         if self.use_uncertainty_weighting and num_batches > 0:
-            avg_log_var_gec = accumulated_log_vars['gec'] / num_batches
+            avg_log_var_ged = accumulated_log_vars['ged'] / num_batches
             avg_log_var_svo = accumulated_log_vars['svo'] / num_batches
             avg_log_var_sent = accumulated_log_vars['sent'] / num_batches
             
-            self.uncertainty_history['log_var_gec'].append(avg_log_var_gec)
+            self.uncertainty_history['log_var_ged'].append(avg_log_var_ged)
             self.uncertainty_history['log_var_svo'].append(avg_log_var_svo)
             self.uncertainty_history['log_var_sent'].append(avg_log_var_sent)
             
             import math
-            self.uncertainty_history['sigma_gec'].append(math.exp(0.5 * avg_log_var_gec))
+            self.uncertainty_history['sigma_ged'].append(math.exp(0.5 * avg_log_var_ged))
             self.uncertainty_history['sigma_svo'].append(math.exp(0.5 * avg_log_var_svo))
             self.uncertainty_history['sigma_sent'].append(math.exp(0.5 * avg_log_var_sent))
         
         # DDP: 在所有进程间聚合损失
         if self.use_ddp:
             avg_loss = reduce_tensor(torch.tensor(avg_loss, device=self.device)).item()
-            avg_gec_loss = reduce_tensor(torch.tensor(avg_gec_loss, device=self.device)).item()
+            avg_ged_loss = reduce_tensor(torch.tensor(avg_ged_loss, device=self.device)).item()
             avg_svo_loss = reduce_tensor(torch.tensor(avg_svo_loss, device=self.device)).item()
             avg_sent_loss = reduce_tensor(torch.tensor(avg_sent_loss, device=self.device)).item()
         
         return {
             'loss': avg_loss,
-            'gec_loss': avg_gec_loss,
+            'ged_loss': avg_ged_loss,
             'svo_loss': avg_svo_loss,
             'sent_loss': avg_sent_loss
         }
@@ -478,8 +478,8 @@ class GECTrainer:
         total_loss = 0.0
         
         # 用于计算指标
-        all_gec_preds = []
-        all_gec_labels = []
+        all_ged_preds = []
+        all_ged_labels = []
         all_masks = []
         
         # 仅主进程显示进度条
@@ -492,14 +492,14 @@ class GECTrainer:
             # 移动到设备
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            gec_labels = batch['gec_labels'].to(self.device)
+            ged_labels = batch['ged_labels'].to(self.device)
             svo_labels = batch['svo_labels'].to(self.device)
             sent_labels = batch['sent_label'].to(self.device)
             label_mask = batch['label_mask'].to(self.device)
             
             # 前向传播 (使用AMP)
             with autocast(device_type='cuda', enabled=self.use_amp):
-                gec_logits, svo_logits, sent_logits = self.model(
+                ged_logits, svo_logits, sent_logits = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     label_mask=label_mask  # 修复：传入 label_mask 用于 ErrorAwareSentenceHead
@@ -508,23 +508,23 @@ class GECTrainer:
                 # 计算损失 - 支持两种接口
                 if self.use_uncertainty_weighting:
                     loss, _ = self.criterion(
-                        gec_logits, svo_logits, sent_logits,
-                        gec_labels, svo_labels, sent_labels,
+                        ged_logits, svo_logits, sent_logits,
+                        ged_labels, svo_labels, sent_labels,
                         label_mask
                     )
                 else:
                     loss, _, _, _ = self.criterion(
-                        gec_logits, svo_logits, sent_logits,
-                        gec_labels, svo_labels, sent_labels,
+                        ged_logits, svo_logits, sent_logits,
+                        ged_labels, svo_labels, sent_labels,
                         label_mask
                     )
             total_loss += loss.item()
             
             # 收集预测结果
-            gec_preds = torch.argmax(gec_logits, dim=-1)  # [B, L]
+            ged_preds = torch.argmax(ged_logits, dim=-1)  # [B, L]
             
-            all_gec_preds.append(gec_preds.cpu().numpy())
-            all_gec_labels.append(gec_labels.cpu().numpy())
+            all_ged_preds.append(ged_preds.cpu().numpy())
+            all_ged_labels.append(ged_labels.cpu().numpy())
             all_masks.append(label_mask.cpu().numpy())
         
         # 计算平均损失
@@ -532,8 +532,8 @@ class GECTrainer:
         
         # 计算指标
         metrics = self._compute_metrics(
-            np.concatenate(all_gec_preds),
-            np.concatenate(all_gec_labels),
+            np.concatenate(all_ged_preds),
+            np.concatenate(all_ged_labels),
             np.concatenate(all_masks)
         )
         
@@ -783,7 +783,7 @@ def main(local_rank: int = -1):
     
     # ==================== 加载tokenizer和标签映射 ====================
     tokenizer = BertTokenizer.from_pretrained(cfg.BERT_MODEL)
-    gec_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
+    ged_label_map, svo_label_map = build_label_maps(str(cfg.VOCAB_DIR))
     
     # ==================== 创建数据加载器 ====================
     # DDP时每个GPU的实际batch_size = cfg.BATCH_SIZE
@@ -792,7 +792,7 @@ def main(local_rank: int = -1):
         train_path=str(cfg.SYNTHETIC_DATA_DIR / "train.json"),
         dev_path=str(cfg.SYNTHETIC_DATA_DIR / "dev.json"),
         tokenizer=tokenizer,
-        gec_label_map=gec_label_map,
+        ged_label_map=ged_label_map,
         svo_label_map=svo_label_map,
         batch_size=cfg.BATCH_SIZE,
         num_workers=cfg.NUM_WORKERS,
@@ -812,7 +812,7 @@ def main(local_rank: int = -1):
     
     model = create_model(
         bert_model_name=cfg.BERT_MODEL,
-        num_gec_labels=len(gec_label_map),
+        num_ged_labels=len(ged_label_map),
         num_svo_labels=len(svo_label_map),
         device=device,
         use_syntax_semantic_fusion=use_syntax_semantic_fusion,
@@ -901,7 +901,7 @@ def main(local_rank: int = -1):
     # ==================== 创建训练器 ====================
     use_amp = getattr(cfg, 'USE_AMP', True)  # 默认启用AMP
     
-    trainer = GECTrainer(
+    trainer = GEDTrainer(
         model=model,
         train_loader=train_loader,
         dev_loader=dev_loader,
