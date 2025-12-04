@@ -82,13 +82,13 @@ WEIGHT_DECAY = 0.01
 MAX_GRAD_NORM = 1.0
 
 # 损失函数参数
-FOCAL_LOSS_GAMMA = 2.0      # Focal Loss的聚焦参数
-FOCAL_LOSS_ALPHA = 0.25     # 针对$KEEP标签的权重
+FOCAL_LOSS_GAMMA = 3.0      # Focal Loss的聚焦参数
+FOCAL_LOSS_ALPHA = 0.15     # 针对$KEEP标签的权重
 MTL_LAMBDA_SVO = 0.5        # 多任务学习中SVO任务的权重
 MTL_LAMBDA_SENT = 0.5       # 多任务学习中句级错误检测任务的权重
 
 # Early Stopping
-PATIENCE = 3  # 验证集连续3个epoch没提升就停止
+PATIENCE = 5  # 验证集连续3个epoch没提升就停止
 MIN_DELTA = 0.001  # 最小改善幅度
 
 # ==================== 数据增强配置 ====================
