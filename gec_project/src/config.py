@@ -3,6 +3,7 @@
 定义所有超参数和路径配置
 """
 import os
+import json
 from pathlib import Path
 
 # ==================== 路径配置 ====================
@@ -82,7 +83,7 @@ WEIGHT_DECAY = 0.01
 MAX_GRAD_NORM = 1.0
 
 # 损失函数参数
-FOCAL_LOSS_GAMMA = 3.0      # Focal Loss的聚焦参数
+FOCAL_LOSS_GAMMA = 2.5      # Focal Loss的聚焦参数
 FOCAL_LOSS_ALPHA = 0.15     # 针对$KEEP标签的权重
 MTL_LAMBDA_SVO = 0.5        # 多任务学习中SVO任务的权重
 MTL_LAMBDA_SENT = 0.5       # 多任务学习中句级错误检测任务的权重
@@ -140,75 +141,30 @@ USE_ERROR_AWARE_SENT_HEAD = True  # 是否使用错误感知句级头
 KEEP_LABEL_IDX = 0  # KEEP标签在标签表中的索引
 DETACH_ERROR_CONFIDENCE = False  # 是否detach错误置信度梯度（用于消融实验）
 
-# 公文特有词汇（用于构建混淆集和介词集）
+# 公文特有词汇
+
+# 介词集
 PREPOSITIONS = ["通过", "经过", "在", "由于", "鉴于", "根据",
                 "依据", "按照", "依照", "遵照", "据", "特别是",
                 "为了", "为", "对于", "关于", "针对", "面向",
                 "随着", "当", "值此", "之际","由", "被", "经",
                 "结合", "伴随"]
-POLITICAL_CONFUSIONS = {
-    "权利": "权力",
-    "权力": "权利",
-    "制定": "制订",
-    "制订": "制定",
-    "启用": "起用",
-    "起用": "启用",
-    # 动作与结果/对象
-    "反映": "反应",  # 公文常用来"反映情况"，而非"反应"
-    "反应": "反映",
-    "截至": "截止",  # 截至+具体时间点；截止+动词(报名已截止)
-    "截止": "截至",
-    "作出": "做出",  # 抽象名词多用"作"（作出决定）；具体动作多用"做"
-    "做出": "作出",
-    
-    # 程度/逻辑关系
-    "以至": "以致",  # 以至：程度加深；以致：导致（通常是不好）的结果
-    "以致": "以至",
-    "必须": "必需",  # 必须：一定要（副词）；必需：不可少（动词/形容词）
-    "必需": "必须",
-    
-    # 审查/检查
-    "考查": "考察",  # 考查：成绩/业务；考察：实地观察/干部任用
-    "考察": "考查",
-    "审定": "审订",  # 审定：决定/定稿；审订：审查修订
-    "审订": "审定",
-    
-    # 资金/账目
-    "账目": "帐目",  # 推荐使用"账"（贝字旁与钱有关）
-    "帐目": "账目",
-    "盈利": "营利",  # 盈利：赚了钱；营利：谋求利润（营利性机构）
-    "营利": "盈利",
-    
-    # 范围/期间
-    "期间": "其间",  # 期间：某个时期；其间：那中间
-    "其间": "期间",
-    "界限": "界线",  # 界限：抽象（思想界限）；界线：具体（国境界线）
-    "界线": "界限",
-    "部署": "布署",  # 常见错误写法
-    "布署": "部署",
-    "覆盖": "复盖",  # 常见简化错误
-    "复盖": "覆盖",
-    "宏大": "洪大",  # 规模宏大 vs 声音洪大
-    "洪大": "宏大",
-    "爆发": "暴发",  # 爆发战争/力量；暴发传染病/山洪
-    "暴发": "爆发",
-    "通信": "通讯",  # 通信产业/技术；通讯社/报道
-    "通讯": "通信",
-    "窜改": "篡改",  # 窜改：改动文字；篡改：伪造历史/理论
-    "篡改": "窜改",
-    "度过": "渡过",  # 度过时间；渡过难关（江河）
-    "渡过": "度过",
-    "合计": "核计",  # 合计：一共；核计：核算
-    "核计": "合计",
-    "启示": "启事",  # 获得启示；张贴启事
-    "启事": "启示",
-    "不但": "不单",
-    "而且": "并且",
-    "进而": "从而",  # 进而：进一步；从而：因此
-    "从而": "进而",
-    "颁布": "公布",  # 颁布法律/法令；公布消息/名单
-    "公布": "颁布",
-}
+
+# 混淆集（从JSON文件加载）
+CONFUSIONS_FILE = VOCAB_DIR / "confusions.json"
+
+def _load_confusions() -> dict:
+    """从JSON文件加载混淆集"""
+    if CONFUSIONS_FILE.exists():
+        with open(CONFUSIONS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    else:
+        # 如果文件不存在，返回空字典并警告
+        import logging
+        logging.warning(f"混淆集文件不存在: {CONFUSIONS_FILE}")
+        return {}
+
+POLITICAL_CONFUSIONS = _load_confusions()
 
 
 
@@ -331,6 +287,41 @@ class Config:
         for k, v in config_dict.items():
             setattr(config, k, v)
         return config
+    
+    def save_to_experiment(self, exp_dir: Path, filename: str = "config.yaml") -> Path:
+        """
+        将配置保存到实验目录（与tensorboard目录平级）
+        
+        Args:
+            exp_dir: 实验目录路径，如 experiments/exp_xxx/
+            filename: 配置文件名，默认为 config.yaml
+        
+        Returns:
+            配置文件的完整路径
+        """
+        import yaml
+        
+        exp_dir = Path(exp_dir)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        config_path = exp_dir / filename
+        
+        # 过滤掉不需要序列化的属性（重复的小写别名）
+        config_dict = {}
+        for k, v in self.__dict__.items():
+            # 只保留大写属性，避免重复
+            if k.isupper() or k == 'project_root':
+                if isinstance(v, Path):
+                    config_dict[k] = str(v)
+                elif isinstance(v, (dict, list)):
+                    config_dict[k] = v
+                else:
+                    config_dict[k] = v
+        
+        with open(config_path, 'w', encoding='utf-8') as f:
+            yaml.dump(config_dict, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        
+        return config_path
 
 
 # 创建默认配置实例

@@ -4,14 +4,17 @@
 1. 加载训练好的模型
 2. 对输入文本进行预测
 3. 将编辑操作转换为最终文本
+4. 支持批量预测并输出到CSV文件
 """
 import torch
 import torch.nn.functional as F
 from transformers import BertTokenizer
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Union
 import logging
 from pathlib import Path
 import json
+import csv
+from datetime import datetime
 
 from config import default_config as cfg
 from modeling import GEDModelWithMTL
@@ -145,8 +148,8 @@ class GEDPredictor:
         label_mask_list = [0]  # [CLS] 位置为 0
         
         for token in tokens:
-            token_ids = self.tokenizer.encode(token, add_special_tokens=False)
-            if len(token_ids) > 0:
+            token_ids = self.tokenizer.encode(token, add_special_tokens=False) # 避免每个字都被加特殊符号
+            if len(token_ids) > 0:#如果这个字/单词被编码为多个子词
                 token_to_ids.append(len(input_ids))  # 记录第一个子词位置
                 # 第一个子词标记为 1，后续子词标记为 0
                 label_mask_list.append(1)  # 真实字符的第一个子词
@@ -167,13 +170,12 @@ class GEDPredictor:
         ged_logits, svo_logits, sent_logits = self.model(
             input_ids=input_ids_tensor,
             attention_mask=attention_mask,
-            label_mask=label_mask  # 修复：传入 label_mask 用于 ErrorAwareSentenceHead
+            label_mask=label_mask  # 传入 label_mask 用于 ErrorAwareSentenceHead
         )
         
         # 句级错误检测预测
         sent_probs = F.softmax(sent_logits, dim=-1).squeeze(0)  # [2]
         sent_error_prob = sent_probs[1].item()  # 预测"有错"的概率
-        sent_has_error = sent_error_prob > 0.2  # 二分类阈值
         
         # 获取预测标签
         ged_preds = torch.argmax(ged_logits, dim=-1).squeeze(0).cpu().tolist()
@@ -205,6 +207,8 @@ class GEDPredictor:
         # 应用编辑操作
         corrected_text = self._apply_edits(tokens, token_labels)
         
+        sent_has_error = sent_error_prob > 0.2 or len(edits)>0 # 二分类阈值
+
         result = {
             'original': text,
             'corrected': corrected_text,
@@ -293,6 +297,7 @@ class GEDPredictor:
         - $DELETE: 删除该token
         - $APPEND_X: 在该token后添加字符X
         - $REPLACE_X: 将该token替换为字符X
+        - $REPLACE_MASK / $APPEND_MASK: 模型检测到错误但无法确定具体内容，用[?]标记
         """
         result_tokens = []
         
@@ -307,68 +312,219 @@ class GEDPredictor:
                 # 添加
                 result_tokens.append(token)
                 append_char = label.replace(cfg.GEC_APPEND_PREFIX, '')
-                if append_char:
+                if append_char and append_char != 'MASK':
                     result_tokens.append(append_char)
+                else:
+                    # MASK情况：模型知道需要添加，但不确定添加什么
+                    result_tokens.append('[?]')
             elif label.startswith(cfg.GEC_REPLACE_PREFIX):
                 # 替换
                 replace_char = label.replace(cfg.GEC_REPLACE_PREFIX, '')
                 if replace_char and replace_char != 'MASK':
                     result_tokens.append(replace_char)
                 else:
-                    result_tokens.append(token)  # 无法替换，保持原token
+                    # MASK情况：模型知道需要替换，但不确定替换成什么
+                    result_tokens.append('[?]')
             else:
                 # 未知操作，保持不变
                 result_tokens.append(token)
         
         return ''.join(result_tokens)
     
-    def predict_batch(self, texts: List[str]) -> List[Dict]:
-        """批量预测"""
-        return [self.predict(text) for text in texts]
+    def predict_batch(self, texts: List[str], return_svo: bool = False) -> List[Dict]:
+        """
+        批量预测
+        
+        Args:
+            texts: 输入文本列表
+            return_svo: 是否返回SVO句法分析结果
+        
+        Returns:
+            预测结果列表
+        """
+        return [self.predict(text, return_svo=return_svo) for text in texts]
+    
+    def predict_from_data(
+        self, 
+        data: Dict[str, List], 
+        return_svo: bool = False
+    ) -> List[Dict]:
+        """
+        从数据字典格式进行批量预测
+        
+        Args:
+            data: 数据字典，格式为 {'source': [...], 'target': [...], 'type': [...]}
+                  - source: 原句列表
+                  - target: 正确句列表（可选，用于评估）
+                  - type: 样本类型列表，'positive'表示无错，'negative'表示有错
+            return_svo: 是否返回SVO句法分析结果
+        
+        Returns:
+            预测结果列表，每个结果包含原始数据信息和预测结果
+        """
+        sources = data.get('source', [])
+        targets = data.get('target', sources)  # 如果没有target，用source
+        types = data.get('type', ['unknown'] * len(sources))
+        
+        results = []
+        for i, (source, target, sample_type) in enumerate(zip(sources, targets, types)):
+            pred_result = self.predict(source, return_svo=return_svo)
+            
+            # 添加原始数据信息
+            pred_result['target'] = target
+            pred_result['sample_type'] = sample_type
+            pred_result['gt_has_error'] = (sample_type == 'negative')  # negative表示有错
+            pred_result['index'] = i
+            
+            results.append(pred_result)
+        
+        return results
+    
+    def save_predictions_to_csv(
+        self, 
+        predictions: List[Dict], 
+        output_path: str,
+        include_svo: bool = False
+    ) -> str:
+        """
+        将预测结果保存到CSV文件
+        
+        Args:
+            predictions: 预测结果列表
+            output_path: 输出文件路径
+            include_svo: 是否包含SVO信息
+        
+        Returns:
+            实际保存的文件路径
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 定义CSV字段
+        fieldnames = [
+            'index', 'original', 'target', 'corrected', 
+            'sample_type', 'gt_has_error', 'pred_has_error', 'sent_error_prob',
+            'num_edits', 'edits_summary'
+        ]
+        
+        if include_svo:
+            fieldnames.extend(['subjects', 'predicates', 'objects'])
+        
+        with open(output_path, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for pred in predictions:
+                row = {
+                    'index': pred.get('index', ''),
+                    'original': pred.get('original', ''),
+                    'target': pred.get('target', ''),
+                    'corrected': pred.get('corrected', ''),
+                    'sample_type': pred.get('sample_type', ''),
+                    'gt_has_error': pred.get('gt_has_error', ''),
+                    'pred_has_error': pred.get('sent_has_error', ''),
+                    'sent_error_prob': f"{pred.get('sent_error_prob', 0):.4f}",
+                    'num_edits': len(pred.get('edits', [])),
+                    'edits_summary': '; '.join([
+                        f"{e['position']}:{e['token']}->{e['operation']}" 
+                        for e in pred.get('edits', [])
+                    ])
+                }
+                
+                if include_svo and 'svo_analysis' in pred:
+                    svo = pred['svo_analysis']
+                    row['subjects'] = '|'.join(svo.get('subjects', []))
+                    row['predicates'] = '|'.join(svo.get('predicates', []))
+                    row['objects'] = '|'.join(svo.get('objects', []))
+                
+                writer.writerow(row)
+        
+        logger.info(f"预测结果已保存到: {output_path}")
+        return str(output_path)
 
 def main():
-    """测试推理"""
-    # 示例
-    SpecificDir = "exp_20251204_001843_ddp2gpu_uwl"
-    model_path = cfg.EXPERIMENTS_DIR / SpecificDir / 'best_f2_model'/"best_f2_model.pt"
-    vocab_dir = cfg.VOCAB_DIR
+    """
+    预测主函数
     
-    if not model_path.exists():
-        logger.error(f"Model not found at {model_path}")
+    使用方法：
+        python predictor.py --model_path <模型路径>
+        python predictor.py --exp_name <实验名称>
+    
+    参数说明：
+        --model_path: 模型checkpoint路径
+        --exp_name: 实验名称（用于自动查找模型路径）
+        --return_svo: 是否输出SVO句法分析结果
+    
+    注意：数据输入使用datasets库在代码中获取，格式为字典 {'source': [...], 'target': [...], 'type': [...]}
+    用户需要在代码中自行添加数据加载逻辑，调用 predict_from_data(data) 方法进行预测。
+    """
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='GED模型预测')
+    parser.add_argument('--model_path', type=str, default=None,
+                        help='模型checkpoint路径')
+    parser.add_argument('--exp_name', type=str, default=None,
+                        help='实验名称（用于自动查找模型路径）')
+    parser.add_argument('--return_svo', action='store_true',
+                        help='是否输出SVO句法分析结果')
+    
+    args = parser.parse_args()
+    
+    # 确定模型路径
+    if args.model_path:
+        model_path = Path(args.model_path)
+    elif args.exp_name:
+        model_path = cfg.EXPERIMENTS_DIR / args.exp_name / "best_f2_model" / "best_f2_model.pt"
+    else:
+        logger.error("请指定 --model_path 或 --exp_name 参数")
         return
     
+    if not model_path.exists():
+        logger.error(f"模型文件不存在: {model_path}")
+        return
+    
+    # 设置设备（默认使用cuda）
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logger.info(f"使用设备: {device}")
+    
     # 创建预测器
+    logger.info(f"加载模型: {model_path}")
     predictor = GEDPredictor(
         model_path=str(model_path),
-        vocab_dir=str(vocab_dir),
-        device='cuda' if torch.cuda.is_available() else 'cpu'
+        vocab_dir=str(cfg.VOCAB_DIR),
+        device=device
     )
     
-    # 测试样例
-    test_texts = [
-        "通过这次活动，使我们认识到了错误。",
-        "在党的领导下，取得了伟大成就。",
-        "我们要认真学习贯彻会议精神。",
-        "不发分子冒充流调工作者通过发送不明木马链接、兜售特效药、拉入各种群刷单等形式骗取受害人钱款。"
-    ]
+    # ==================== 数据加载区域 ====================
+    # 用户在此处添加数据加载代码，使用datasets库加载数据
+    # 数据格式应为字典: {'source': [...], 'target': [...], 'type': [...]}
+    # 示例:
+    # from datasets import load_dataset
+    # dataset = load_dataset("your_dataset")
+    # data = {
+    #     'source': dataset['test']['source'],
+    #     'target': dataset['test']['target'],
+    #     'type': dataset['test']['type']
+    # }
+    # ======================================================
     
-    for text in test_texts:
-        result = predictor.predict(text, return_svo=True)
-        print(f"\n原文: {result['original']}")
-        print(f"纠正: {result['corrected']}")
-        print(f"句级判断: {'[有错]' if result['sent_has_error'] else '[无错]'} (概率: {result['sent_error_prob']:.3f})")
-        if result['edits']:
-            print(f"编辑: {result['edits']}")
-        else:
-            print("编辑: 无需修改")
-        
-        # 显示SVO分析结果
-        if 'svo_analysis' in result:
-            svo = result['svo_analysis']
-            print(f"句法分析:")
-            print(f"  - 主语: {svo['subjects'] if svo['subjects'] else '未识别到'}")
-            print(f"  - 谓语: {svo['predicates'] if svo['predicates'] else '未识别到'}")
-            print(f"  - 宾语: {svo['objects'] if svo['objects'] else '未识别到'}")
+    data = None  # 用户需要替换为实际数据
+    
+    if data is None:
+        logger.warning("未加载数据，请在代码中添加数据加载逻辑")
+        logger.info("数据格式示例: {'source': [...], 'target': [...], 'type': [...]}")
+        return
+    
+    # 执行预测
+    predictions = predictor.predict_from_data(data, return_svo=args.return_svo)
+    
+    # 确定输出路径
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = model_path.parent / f"predictions_{timestamp}.csv"
+    
+    # 保存结果
+    predictor.save_predictions_to_csv(predictions, output_path, include_svo=args.return_svo)
+    logger.info(f"批量预测完成，共处理 {len(predictions)} 条样本")
 
 
 if __name__ == "__main__":

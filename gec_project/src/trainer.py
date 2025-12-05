@@ -257,6 +257,11 @@ class GEDTrainer:
             self.f2_best_dir = None
             self.writer = None
         
+        # 保存训练配置到实验目录（与tensorboard目录平级）
+        if is_main_process():
+            config_path = cfg.save_to_experiment(self.exp_dir)
+            logger.info(f"配置已保存到: {config_path}")
+        
         if is_main_process():
             logger.info(f"Trainer initialized: AMP={self.use_amp}, DDP={self.use_ddp}, "
                        f"gradient_accumulation_steps={self.gradient_accumulation_steps}, "
